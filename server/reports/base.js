@@ -3,6 +3,7 @@
 // Import this in each report file rather than duplicating logic.
 
 const { mintsoftGet } = require('../mintsoft');
+const { resolveScope } = require('../scope');
 
 const PAGE_LIMIT = 100;  // Mintsoft hard cap
 const ITEM_BATCH = 10;   // Concurrent order item fetches
@@ -108,18 +109,20 @@ function startSSE(res) {
     'Content-Type':  'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection':    'keep-alive',
-    'Access-Control-Allow-Origin': '*'
   });
   return (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-// Parse common report query params from a URL
+// Parse common report query params from a URL. Client scope comes from
+// resolveScope: a client session can never read another client's data.
 function parseReportParams(url, session) {
+  const scope = resolveScope(session, url);
+  if (!scope.ok) throw new Error(scope.error);
   return {
     warehouseId: url.searchParams.get('warehouseId'),
-    clientId:    url.searchParams.get('clientId') || session.clientId,
+    clientId:    scope.clientId ? String(scope.clientId) : null,
     // Multi-client: comma-separated Mintsoft client IDs; takes priority over single clientId
-    clientIds:   (url.searchParams.get('clientIds') || '').split(',').filter(Boolean),
+    clientIds:   scope.clientIds.map(String),
     // Status filter: comma-separated status strings
     statuses:    (url.searchParams.get('statuses')  || '').split(',').filter(Boolean),
     dateFrom:    url.searchParams.get('dateFrom'),

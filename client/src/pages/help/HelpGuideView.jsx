@@ -145,7 +145,7 @@ function HubOverview() {
       </Section>
 
       <Section id="data" title="Keeping your data fresh">
-        <p>Your data refreshes automatically every night. If you need the latest figures right now, use the <strong className="text-ink">Sync Data</strong> button at the bottom of the sidebar to pull your most recent orders and stock. You can also jump to the full warehouse management system any time via the <strong className="text-ink">Premium WMS</strong> link in the top right.</p>
+        <p>Your data refreshes automatically every night. If you need figures more up to date than that, please contact the warehouse team. You can also jump to the full warehouse management system any time via the <strong className="text-ink">Premium WMS</strong> link in the top right.</p>
       </Section>
     </article>
   )

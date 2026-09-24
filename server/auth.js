@@ -4,13 +4,49 @@
 const https  = require('https');
 const crypto = require('crypto');
 const { mintsoftGet } = require('./mintsoft');
-const { runFullSync, runIncrementalSync } = require('./sync');
+const { runIncrementalSync } = require('./sync');
 const { queryOne } = require('./db');
 const { DEMO_WAREHOUSE, DEMO_CLIENTS } = require('./demo/constants');
 
 // In-memory session store: { sessionToken: { apiKey, clientId, username, ... } }
 const sessions = {};
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+// Secure cookies in production (Render sets RENDER; NODE_ENV may not be set there).
+const SECURE_COOKIE = process.env.NODE_ENV === 'production' || !!process.env.RENDER;
+
+function sessionCookie(token, maxAgeSec) {
+  return `session=${token}; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSec}; Path=/${SECURE_COOKIE ? '; Secure' : ''}`;
+}
+
+// ── Login rate limit (in-memory, per IP): 10 attempts per 10 minutes ──────────
+const LOGIN_WINDOW_MS    = 10 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+const loginAttempts = new Map(); // ip → [timestamps]
+
+function clientIp(req) {
+  // Cloudflare sets cf-connecting-ip; Render's proxy sets x-forwarded-for.
+  return req.headers['cf-connecting-ip']
+    || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+    || req.socket.remoteAddress || 'unknown';
+}
+
+// Records an attempt; returns seconds to wait if the IP is over the limit, else 0.
+function loginRateLimited(req) {
+  const now = Date.now();
+  const ip  = clientIp(req);
+  const recent = (loginAttempts.get(ip) || []).filter(t => now - t < LOGIN_WINDOW_MS);
+  if (recent.length >= LOGIN_MAX_ATTEMPTS) {
+    loginAttempts.set(ip, recent);
+    return Math.ceil((recent[0] + LOGIN_WINDOW_MS - now) / 1000);
+  }
+  recent.push(now);
+  loginAttempts.set(ip, recent);
+  if (loginAttempts.size > 10000) {
+    for (const [k, ts] of loginAttempts) if (!ts.some(t => now - t < LOGIN_WINDOW_MS)) loginAttempts.delete(k);
+  }
+  return 0;
+}
 
 // ── Mintsoft Auth ─────────────────────────────────────────────────────────────
 
@@ -213,6 +249,11 @@ function requireSession(req, res) {
 
 // POST /api/login
 async function login(req, res) {
+  const retryAfter = loginRateLimited(req);
+  if (retryAfter) {
+    res.setHeader('Retry-After', String(retryAfter));
+    return res.json(429, { error: 'Too many login attempts — please wait a few minutes and try again' });
+  }
   try {
     const { username, password } = await req.json();
     if (!username || !password) return res.json(400, { error: 'Username and password required' });
@@ -245,7 +286,7 @@ async function login(req, res) {
 
     res.writeHead(200, {
       'Content-Type': 'application/json',
-      'Set-Cookie':   `session=${token}; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}; Path=/`
+      'Set-Cookie':   sessionCookie(token, SESSION_TTL_MS / 1000)
     });
     res.end(JSON.stringify({
       success:    true,
@@ -283,7 +324,7 @@ function demoLogin(req, res) {
 
   res.writeHead(200, {
     'Content-Type': 'application/json',
-    'Set-Cookie':   `session=${token}; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}; Path=/`
+    'Set-Cookie':   sessionCookie(token, SESSION_TTL_MS / 1000)
   });
   res.end(JSON.stringify({
     success:     true,
@@ -296,26 +337,25 @@ function demoLogin(req, res) {
   }));
 }
 
+// Only warehouse logins may start a sync, and only an incremental one when no
+// job has started in the last 6 h and none is currently running (a 'running'
+// row older than 3 h is a zombie, see sync.abandonStaleJobs). Client logins
+// never sync: client keys must not write into the shared tables.
 async function triggerBackgroundSync({ apiKey, username, isWarehouse }) {
+  if (!isWarehouse) return;
   try {
-    // Clients always run an incremental sync (light, and scoped to their own
-    // data by their API key) — never a heavy full sync.
-    if (!isWarehouse) {
-      console.log(`[sync] Client login — running incremental for ${username}`);
-      await runIncrementalSync({ apiKey, triggeredBy: 'login' });
+    const recent = await queryOne(
+      `SELECT id, status, started_at FROM sync_jobs
+       WHERE started_at > NOW() - INTERVAL '6 hours'
+          OR (status = 'running' AND started_at > NOW() - INTERVAL '3 hours')
+       ORDER BY started_at DESC LIMIT 1`
+    );
+    if (recent) {
+      console.log(`[sync] Login by ${username} — skipping sync (job ${recent.id} ${recent.status} started ${recent.started_at.toISOString()})`);
       return;
     }
-    // Warehouse: full sync on first ever run, incremental thereafter.
-    const lastJob = await queryOne(
-      `SELECT id FROM sync_jobs WHERE status IN ('success','partial') ORDER BY completed_at DESC LIMIT 1`
-    );
-    if (!lastJob) {
-      console.log(`[sync] No previous completed sync — running full sync for ${username}`);
-      await runFullSync({ apiKey, triggeredBy: 'login' });
-    } else {
-      console.log(`[sync] Previous sync found — running incremental for ${username}`);
-      await runIncrementalSync({ apiKey, triggeredBy: 'login' });
-    }
+    console.log(`[sync] Login by ${username} — running incremental`);
+    await runIncrementalSync({ apiKey, triggeredBy: 'login' });
   } catch (err) {
     console.error('[sync] Background sync error:', err.message);
   }
@@ -327,7 +367,7 @@ function logout(req, res) {
   if (token) delete sessions[token];
   res.writeHead(200, {
     'Content-Type': 'application/json',
-    'Set-Cookie':   'session=; HttpOnly; Max-Age=0; Path=/'
+    'Set-Cookie':   sessionCookie('', 0)
   });
   res.end(JSON.stringify({ success: true }));
 }

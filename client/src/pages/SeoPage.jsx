@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react'
 import { useSession } from '../context/SessionContext'
+import seoLogo from '../assets/pf-seo-logo.png'
 import StatusBar from '../components/StatusBar'
 
 const PACKAGES = [
@@ -91,9 +92,7 @@ export default function SeoPage() {
       <div className="p-4 sm:p-7 max-w-6xl mx-auto space-y-10">
         {/* Hero */}
         <div className="text-center">
-          <div className="font-sans font-extrabold text-4xl sm:text-5xl tracking-tight mb-5">
-            <span className="text-navy">AR</span><span className="text-gold">Analytics</span>
-          </div>
+          <img src={seoLogo} alt="Premium Fulfilment SEO" className="h-16 sm:h-20 w-auto mx-auto mb-5" />
           <p className="font-sans text-ink-muted text-base max-w-2xl mx-auto leading-relaxed">
             Premium Fulfilment can help you with your website SEO. These are the three packages that we can offer you.
           </p>

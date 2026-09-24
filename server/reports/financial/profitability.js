@@ -40,13 +40,10 @@ async function run(req, res, url, session) {
 
 // ── Warehouse: revenue per client ─────────────────────────────────────────────
 
+// Rows come from the invoices themselves (joined to the clients table for the
+// name), not from session.clients — churned clients no longer returned by
+// Mintsoft /api/Client still had revenue in past months.
 async function runWarehouseView(send, session, fromParam, toParam) {
-  const clients = session.clients || [];
-  if (!clients.length) {
-    send({ type: 'done', viewType: 'warehouse', rows: [], meta: { totalRevenue: 0, totalClients: 0 } });
-    return;
-  }
-
   const now  = new Date();
   const from = fromParam || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
   const to   = toParam   || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -54,15 +51,19 @@ async function runWarehouseView(send, session, fromParam, toParam) {
   send({ type: 'progress', message: 'Fetching billing data…' });
   const invRows = await getInvoicesForMonth(from);
 
-  const invMap = {};
-  for (const inv of invRows) invMap[String(inv.ClientId)] = inv;
+  const ids = [...new Set(invRows.map(inv => inv.ClientId).filter(id => id != null))];
+  const nameMap = {};
+  if (ids.length) {
+    const named = await query(`SELECT id, name FROM clients WHERE id = ANY($1)`, [ids]);
+    named.forEach(c => { nameMap[c.id] = c.name; });
+  }
 
   const rows = [];
-  for (const client of clients) {
-    const msClientId = String(client.ID || client.id);
-    const name       = client.Name || client.name || msClientId;
-    const inv        = invMap[msClientId];
-    if (!inv) continue;
+  for (const inv of invRows) {
+    const msClientId = inv.ClientId != null ? String(inv.ClientId) : null;
+    const name       = msClientId
+      ? (nameMap[inv.ClientId] || `Client #${msClientId}`)
+      : 'Unassigned (no client)';
 
     const picking = inv.PickingCost  || 0;
     const postage = (inv.PostageCost || 0) + (inv.VatFreePostageCost || 0);
@@ -139,7 +140,7 @@ async function runClientView(send, clientId, session, fromParam, toParam) {
   const orderMap = {};
   if (orderIds.length) {
     const od = await query(
-      `SELECT id, order_number, despatch_date::date AS date,
+      `SELECT id, order_number, to_char(despatch_date AT TIME ZONE 'Europe/London', 'YYYY-MM-DD') AS date,
               NULLIF(TRIM(CONCAT_WS(' ', recipient_first_name, recipient_last_name)), '') AS customer,
               number_of_parcels
        FROM orders WHERE id = ANY($1)`,

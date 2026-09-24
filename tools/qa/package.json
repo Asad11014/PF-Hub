@@ -1,0 +1,14 @@
+{
+  "name": "aranalytics-qa",
+  "private": true,
+  "description": "Local QA harness: Playwright walkthrough + API/security checks. Not installed in production.",
+  "scripts": {
+    "install-browser": "playwright install chromium-headless-shell",
+    "serve": "node launcher.js",
+    "screens": "node screens.js",
+    "probe": "node api-probe.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}

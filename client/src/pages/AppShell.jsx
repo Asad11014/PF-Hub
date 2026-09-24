@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { useSession } from '../context/SessionContext'
 import { UIProvider, useUI } from '../context/UIContext'
 import Sidebar from '../components/Sidebar'
+import pfLogo from '../assets/pf-hub-logo.png'
 import Dashboard   from './Dashboard'
 import Calendar    from './Calendar'
 
@@ -96,9 +97,8 @@ function AppShellLayout() {
               <rect y="12" width="18" height="2" rx="1" fill="currentColor"/>
             </svg>
           </button>
-          <Link to="/app" onClick={closeSidebar} aria-label="Go to dashboard"
-            className="font-sans font-extrabold text-xl sm:text-2xl tracking-tight leading-none">
-            <span className="text-navy">AR</span><span className="text-gold">Analytics</span>
+          <Link to="/app" onClick={closeSidebar} aria-label="Go to dashboard">
+            <img src={pfLogo} alt="Premium Fulfilment Hub" className="h-8 sm:h-10 w-auto" />
           </Link>
         </div>
         <a href="https://wms.premiumfulfilment.co.uk" target="_blank" rel="noopener noreferrer"

@@ -7,10 +7,17 @@ const { query, queryOne } = require('../db');
 // ── ID resolution ─────────────────────────────────────────────────────────────
 
 // Resolve URL params to integer IDs. No DB lookup needed — Mintsoft IDs are PKs.
+// Client sessions are always pinned to their own clientId (see server/scope.js);
+// a client session without one throws rather than widening to every client.
 function resolveIds(session, msWarehouseId, msClientId) {
   const warehouseId = msWarehouseId ? parseInt(msWarehouseId) : null;
-  const effectiveClientId = msClientId || (session.isWarehouse ? null : session.clientId);
-  const clientId = effectiveClientId ? parseInt(effectiveClientId) : null;
+  if (!session.isWarehouse) {
+    const own = session.clientId ? parseInt(session.clientId) : null;
+    if (!own) throw new Error('Your login is not linked to a client account. Please contact the warehouse.');
+    if (msClientId && parseInt(msClientId) !== own) throw new Error('Not permitted for this client');
+    return { warehouseId, clientId: own };
+  }
+  const clientId = msClientId ? parseInt(msClientId) : null;
   return { warehouseId, clientId };
 }
 

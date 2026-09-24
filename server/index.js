@@ -7,7 +7,7 @@ const http      = require('http');
 const path      = require('path');
 const fs        = require('fs');
 const auth      = require('./auth');
-const proxy     = require('./proxy');
+const { requireScope } = require('./scope');
 const reports   = require('./reports/index');
 const dashboard = require('./reports/dashboard');
 const calendar    = require('./calendar');
@@ -18,7 +18,7 @@ const forecasting = require('./forecasting/api');
 const storage     = require('./storage');
 const { sendEmail } = require('./email');
 const { ensureCoreSchema } = require('./schema');
-const { runFullSync, runIncrementalSync, getSyncStatus } = require('./sync');
+const { runFullSync, runIncrementalSync, getSyncStatus, abandonStaleJobs } = require('./sync');
 const { query, queryOne } = require('./db');
 const { seedDemo } = require('./demo/seed-demo');
 
@@ -28,6 +28,7 @@ const DEMO_MODE = !!process.env.DEMO_MODE;
 ensureCoreSchema()
   .then(() => Promise.all([
     calendar.ensureSchema(),
+    abandonStaleJobs(),
   ]))
   .then(() => { if (DEMO_MODE) return seedDemo(); })
   .catch(e => console.error('[schema] Bootstrap error:', e.message));
@@ -73,10 +74,13 @@ const PORT     = process.env.PORT || 3001;
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
-  // ── CORS ──────────────────────────────────────────────────────────────────
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, ms-apikey');
+  // ── Security headers ──────────────────────────────────────────────────────
+  // Same-origin only: no Access-Control-Allow-* headers, so browsers block
+  // cross-origin reads. HSTS is ignored by browsers over plain http (local dev).
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   // ── Request helpers ───────────────────────────────────────────────────────
@@ -102,7 +106,7 @@ const server = http.createServer(async (req, res) => {
 
     // ── Dashboard route ───────────────────────────────────────────────────────
     if (pathname === '/api/dashboard' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       return dashboard.run(req, res, url, session);
     }
@@ -116,7 +120,7 @@ const server = http.createServer(async (req, res) => {
 
     // ── Report data routes ────────────────────────────────────────────────────
     if (pathname.startsWith('/api/report/') && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       return reports.handleReport(req, res, url, session);
     }
@@ -126,10 +130,9 @@ const server = http.createServer(async (req, res) => {
       const session = auth.requireSession(req, res);
       if (!session) return;
       if (session.demo) return res.json(200, { ok: true, demo: true, message: 'Sync is disabled in the demo' });
+      if (!session.isWarehouse) return res.json(403, { error: 'Warehouse users only' });
       const body = await req.json().catch(() => ({}));
-      // Clients may only run incremental syncs; their API key scopes the data to
-      // their own account. Only warehouse users can trigger a full sync.
-      const full = session.isWarehouse ? (body.full !== false) : false;
+      const full = body.full !== false;
       res.json(200, { ok: true, message: full ? 'Full sync started' : 'Incremental sync started' });
       setImmediate(async () => {
         const fn = full ? runFullSync : runIncrementalSync;
@@ -141,6 +144,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/sync/status' && req.method === 'GET') {
       const session = auth.requireSession(req, res);
       if (!session) return;
+      if (!session.isWarehouse) return res.json(403, { error: 'Warehouse users only' });
       const status = await getSyncStatus();
       return res.json(200, status);
     }
@@ -149,6 +153,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/orders/by-client' && req.method === 'GET') {
       const session = auth.requireSession(req, res);
       if (!session) return;
+      if (!session.isWarehouse) return res.json(403, { error: 'Warehouse users only' });
 
       const msWarehouseId = url.searchParams.get('warehouseId');
       const dateFrom      = url.searchParams.get('dateFrom');
@@ -201,14 +206,14 @@ const server = http.createServer(async (req, res) => {
 
     // ── Calendar routes ───────────────────────────────────────────────────────
     if (pathname === '/api/calendar' && (req.method === 'GET' || req.method === 'POST')) {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (blockDemoWrite(session, req, res)) return;
       return calendar.handle(req, res, url, session, req.method, null);
     }
     const calEventMatch = pathname.match(/^\/api\/calendar\/(\d+)$/);
     if (calEventMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (blockDemoWrite(session, req, res)) return;
       return calendar.handle(req, res, url, session, req.method, calEventMatch[1]);
@@ -239,60 +244,60 @@ const server = http.createServer(async (req, res) => {
 
     // ── Forecasting / Inventory Planner ───────────────────────────────────────
     if (pathname === '/api/forecasting/plan' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       try { return await forecasting.plan(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/forecasting/forecast' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       try { return await forecasting.forecast(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/forecasting/run' && req.method === 'POST') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await forecasting.run(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/forecasting/config' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       try { return await forecasting.getConfig(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/forecasting/config' && req.method === 'PUT') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await forecasting.putConfig(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/forecasting/lead-time' && req.method === 'POST') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await forecasting.saveLeadTime(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/forecasting/lead-time' && req.method === 'DELETE') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await forecasting.deleteLeadTime(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/forecasting/event' && req.method === 'POST') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await forecasting.saveEvent(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/forecasting/event' && req.method === 'DELETE') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await forecasting.deleteEvent(req, res, url, session); }
@@ -301,19 +306,19 @@ const server = http.createServer(async (req, res) => {
 
     // ── Storage calculator + Excess stock (client-facing, DB-backed) ──────────
     if (pathname === '/api/storage' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       try { return await storage.storageBreakdown(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/excess' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       try { return await storage.excessStock(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/storage/cost' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       try { return await storage.storageCost(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
@@ -321,13 +326,11 @@ const server = http.createServer(async (req, res) => {
 
     // ── Product overview (all of a client's products + on-hand stock) ──────────
     if (pathname === '/api/products/overview' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
 
       // Clients see their own products; warehouse users can scope by clientId.
-      const clientId = session.isWarehouse
-        ? (url.searchParams.get('clientId') ? parseInt(url.searchParams.get('clientId')) : null)
-        : (session.clientId ? parseInt(session.clientId) : null);
+      const { clientId } = req.scope;
 
       const params = [];
       let where = '';
@@ -363,14 +366,12 @@ const server = http.createServer(async (req, res) => {
 
     // ── Order search (for Book a Return — find the order to return) ────────────
     if (pathname === '/api/orders/search' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       const q = (url.searchParams.get('q') || '').trim();
       if (q.length < 2) return res.json(200, { orders: [] });
 
-      const clientId = session.isWarehouse
-        ? (url.searchParams.get('clientId') ? parseInt(url.searchParams.get('clientId')) : null)
-        : (session.clientId ? parseInt(session.clientId) : null);
+      const { clientId } = req.scope;
 
       const params = [`%${q}%`];
       let where = `WHERE (o.order_number ILIKE $1 OR o.external_reference ILIKE $1)`;
@@ -395,7 +396,7 @@ const server = http.createServer(async (req, res) => {
 
     // ── Order detail for a return (recipient, address, items) ──────────────────
     if (pathname === '/api/orders/return-detail' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       const id = parseInt(url.searchParams.get('id'));
       if (!id) return res.json(400, { error: 'id is required' });
@@ -428,28 +429,28 @@ const server = http.createServer(async (req, res) => {
 
     // ── Returns ───────────────────────────────────────────────────────────────
     if (pathname === '/api/returns' && req.method === 'POST') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await returns.create(req, res, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (pathname === '/api/returns' && req.method === 'GET') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       try { return await returns.list(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     const returnMatch = pathname.match(/^\/api\/returns\/(\d+)$/);
     if (returnMatch && req.method === 'PATCH') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await returns.update(req, res, session, returnMatch[1]); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
     if (returnMatch && req.method === 'DELETE') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await returns.remove(req, res, session, returnMatch[1]); }
@@ -457,7 +458,7 @@ const server = http.createServer(async (req, res) => {
     }
     const returnRestoreMatch = pathname.match(/^\/api\/returns\/(\d+)\/restore$/);
     if (returnRestoreMatch && req.method === 'POST') {
-      const session = auth.requireSession(req, res);
+      const session = requireScopedSession(req, res, url);
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await returns.restore(req, res, session, returnRestoreMatch[1]); }
@@ -497,16 +498,9 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // ── Pass-through proxy ────────────────────────────────────────────────────
-    // Disabled entirely in demo: the demo has no Mintsoft credentials and must
-    // never reach the live API.
-    if (pathname.startsWith('/proxy/')) {
-      if (DEMO_MODE) return res.json(403, { error: 'Disabled in demo' });
-      return proxy.passThrough(req, res, url);
-    }
-
     // ── SPA static serving (production build) ─────────────────────────────────
-    if (req.method === 'GET') {
+    // Unknown API paths (and the removed /proxy relay) are a JSON 404, never the SPA shell.
+    if (req.method === 'GET' && !/^\/(api|proxy)(\/|$)/.test(pathname)) {
       const assetPath = path.join(DIST_DIR, pathname);
       if (fs.existsSync(assetPath) && fs.statSync(assetPath).isFile()) {
         const ext  = path.extname(pathname);
@@ -529,6 +523,17 @@ const server = http.createServer(async (req, res) => {
     res.json(500, { error: err.message });
   }
 });
+
+// Session + tenant scope for data routes (server/scope.js). Writes 401/403 and
+// returns null when denied; otherwise sets req.scope and returns the session.
+function requireScopedSession(req, res, url) {
+  const session = auth.requireSession(req, res);
+  if (!session) return null;
+  const scope = requireScope(session, url, res);
+  if (!scope) return null;
+  req.scope = scope;
+  return session;
+}
 
 // Reject mutating requests for demo sessions. Returns true if the request was
 // handled (blocked), false otherwise. GETs always pass through (read-only demo).

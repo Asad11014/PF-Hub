@@ -704,10 +704,22 @@ async function getSyncStatus() {
     `SELECT id, entity, triggered_by, status, records_synced, current_step, error, started_at, completed_at
      FROM sync_jobs ORDER BY started_at DESC LIMIT 1`
   );
-  const session = await queryOne(
-    `SELECT synced_at FROM user_sessions WHERE synced_at IS NOT NULL ORDER BY synced_at DESC LIMIT 1`
+  const last = await queryOne(
+    `SELECT MAX(completed_at) AS completed_at FROM sync_jobs WHERE status IN ('success','partial')`
   );
-  return { lastSyncAt: session?.synced_at ?? null, lastJob: job ?? null };
+  return { lastSyncAt: last?.completed_at ?? null, lastJob: job ?? null };
 }
 
-module.exports = { runFullSync, runIncrementalSync, getSyncStatus, syncWarehouses, syncClients, syncOrders };
+// On boot: any job still 'running' after 3 h is a zombie from a killed process
+// (deploy/restart mid-sync). Close it so it stops blocking or confusing status.
+async function abandonStaleJobs() {
+  const rows = await query(
+    `UPDATE sync_jobs SET status='error', error='abandoned', current_step=NULL, completed_at=NOW()
+     WHERE status='running' AND started_at < NOW() - INTERVAL '3 hours'
+     RETURNING id`
+  );
+  if (rows.length) console.log(`[sync] Marked ${rows.length} stale running job(s) as abandoned: ${rows.map(r => r.id).join(', ')}`);
+  return rows.length;
+}
+
+module.exports = { runFullSync, runIncrementalSync, getSyncStatus, abandonStaleJobs, syncWarehouses, syncClients, syncOrders };

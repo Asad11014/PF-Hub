@@ -114,11 +114,13 @@ async function createEvent(warehouseId, clientId, username, body) {
   return { ...toEventShape(row), sharedClientIds: confirmedShared };
 }
 
-async function updateEvent(warehouseId, eventId, body) {
+// clientId set = client session: may only touch its own events.
+async function updateEvent(warehouseId, eventId, body, clientId = null) {
   const { title, description, type, date, time, endDate, endTime, color, allDay } = body;
   const conditions = [`id = $1`];
   const p = [eventId];
   if (warehouseId) conditions.push(`warehouse_id = $${p.push(warehouseId)}`);
+  if (clientId)    conditions.push(`client_id = $${p.push(clientId)}`);
 
   const row = await queryOne(
     `UPDATE calendar_events SET
@@ -140,10 +142,11 @@ async function updateEvent(warehouseId, eventId, body) {
   return toEventShape(row);
 }
 
-async function deleteEvent(warehouseId, eventId) {
+async function deleteEvent(warehouseId, eventId, clientId = null) {
   const conditions = [`id = $1`];
   const p = [eventId];
   if (warehouseId) conditions.push(`warehouse_id = $${p.push(warehouseId)}`);
+  if (clientId)    conditions.push(`client_id = $${p.push(clientId)}`);
   const row = await queryOne(
     `DELETE FROM calendar_events WHERE ${conditions.join(' AND ')} RETURNING id`,
     p
@@ -261,12 +264,12 @@ async function handle(req, res, url, session, method, eventId) {
 
   if (method === 'PUT' && eventId) {
     const body  = await req.json();
-    const event = await updateEvent(warehouseId, parseInt(eventId), body);
+    const event = await updateEvent(warehouseId, parseInt(eventId), body, clientId);
     return res.json(200, event);
   }
 
   if (method === 'DELETE' && eventId) {
-    const result = await deleteEvent(warehouseId, parseInt(eventId));
+    const result = await deleteEvent(warehouseId, parseInt(eventId), clientId);
     return res.json(200, result);
   }
 

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useSession } from '../context/SessionContext'
+import pfLogo from '../assets/pf-logo-large.png'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -47,11 +48,9 @@ export default function Login() {
     >
       <div className="bg-brand-surface border border-brand-border rounded-xl shadow-modal w-full max-w-[420px] mx-4 p-10">
 
-        {/* Wordmark */}
+        {/* Logo */}
         <div className="flex flex-col items-center text-center mb-8">
-          <div className="font-sans font-extrabold text-4xl tracking-tight mb-3">
-            <span className="text-navy">AR</span><span className="text-gold">Analytics</span>
-          </div>
+          <img src={pfLogo} alt="Premium Fulfilment" className="h-20 w-auto mb-3" />
           <p className="font-mono text-[10px] text-ink-muted tracking-[0.2em] uppercase">
             Analytics · Powered by Mintsoft
           </p>

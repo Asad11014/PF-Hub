@@ -309,7 +309,7 @@ export default function Sidebar() {
           <strong className="block text-white text-xs mb-0.5 truncate">{session?.username}</strong>
           {session?.demo ? 'Demo mode' : session?.isWarehouse ? 'Warehouse user' : 'Client user'}
         </div>
-        {!session?.demo && <SyncButton incrementalOnly={!session?.isWarehouse} />}
+        {!session?.demo && session?.isWarehouse && <SyncButton />}
         <button onClick={logout}
           className="w-full border border-white/20 rounded text-white/70 font-mono text-[11px] py-1.5 hover:border-danger hover:text-danger transition-colors bg-transparent cursor-pointer">
           Sign Out
