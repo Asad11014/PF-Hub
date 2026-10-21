@@ -38,6 +38,8 @@ import BookReturn      from './returns/BookReturn'
 import ReturnHistory   from './returns/ReturnHistory'
 import ReturnsHub      from './operations/ReturnsHub'
 import Placeholder     from './Placeholder'
+import Subscriptions   from './admin/Subscriptions'
+import { RequireModule, SubscriptionRequired } from '../components/ModuleGate'
 
 function WarehouseOnly({ children }) {
   const { session } = useSession()
@@ -62,7 +64,7 @@ function DemoBanner() {
 }
 
 function AppShellLayout() {
-  const { session, loading } = useSession()
+  const { session, loading, hasModule } = useSession()
   const { sidebarOpen, openSidebar, closeSidebar } = useUI()
   const navigate = useNavigate()
 
@@ -82,6 +84,10 @@ function AppShellLayout() {
   }
 
   if (!session) return null
+
+  // A client account without Basic sees only the subscription notice. (A login
+  // with no linked client keeps the normal shell; its data routes explain that.)
+  if (!session.isWarehouse && session.clientId && !hasModule('core')) return <SubscriptionRequired />
 
   return (
     <div className="h-screen flex flex-col bg-brand-bg overflow-hidden">
@@ -137,6 +143,7 @@ function AppShellLayout() {
           {/* Warehouse Hub — placeholders (warehouse only) */}
           <Route path="shipping-requests" element={<WarehouseOnly><Placeholder title="Shipping Requests" blurb="All shipping form requests from clients (collections, pallets, freight) will appear here to action." icon="🚢" /></WarehouseOnly>} />
           <Route path="extras-requests"   element={<WarehouseOnly><Placeholder title="Requests for Extras" blurb="Client requests for extras — SEO, assembly and one-offs — will appear here." icon="✨" /></WarehouseOnly>} />
+          <Route path="admin/subscriptions" element={<WarehouseOnly><Subscriptions /></WarehouseOnly>} />
           <Route path="todo"              element={<WarehouseOnly><Placeholder title="To Do Lists" blurb="Team to-do lists — a future home for warehouse tasks (eventually replacing Trello)." icon="✅" /></WarehouseOnly>} />
 
           {/* Financial */}
@@ -150,7 +157,9 @@ function AppShellLayout() {
           {/* Stock Analytics */}
           <Route path="stock/reports"           element={<ReportsIndex />} />
           <Route path="stock/product-overview"  element={<ProductOverview />} />
-          <Route path="stock/inventory-planner" element={<InventoryPlanner />} />
+          <Route path="stock/inventory-planner" element={<RequireModule module="forecasting" title="Inventory Planner"><InventoryPlanner /></RequireModule>} />
+          <Route path="stock/bbe"               element={<RequireModule module="bbe" title="BBE Report"><Placeholder title="BBE Report" blurb="Stock approaching its best-before / expiry date, by batch and location." icon="⏰" /></RequireModule>} />
+          <Route path="stock/quarantine"        element={<RequireModule module="quarantine" title="Quarantine Report"><Placeholder title="Quarantine Report" blurb="Every unit of your stock currently held in quarantine, by batch and location." icon="🚫" /></RequireModule>} />
           <Route path="stock/excess"            element={<ExcessStock />} />
 
           {/* Returns */}

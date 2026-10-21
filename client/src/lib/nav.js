@@ -49,6 +49,8 @@ export const REPORT_GROUPS = [
 ];
 
 // ── Client Hub navigation (PF Client Hub spec) ────────────────────────────────
+// Items with `module` belong to a paid add-on (server/entitlements.js). Clients
+// without it still see the item, with a lock, and the route shows the add-on page.
 // Seven headings shown to CLIENT users only. Mix of flat links and collapsible
 // groups. Items map to existing pages where available, otherwise to a placeholder.
 // Report sub-categories clients can see — everything from REPORT_GROUPS except
@@ -62,8 +64,10 @@ export const CLIENT_NAV = [
     items: [
       { to: '/app/stock/reports',           label: 'Reports',          icon: '📊' },
       { to: '/app/stock/product-overview',  label: 'Product Overview', icon: '📋' },
-      { to: '/app/stock/inventory-planner', label: 'Inventory Planner', icon: '📦' },
+      { to: '/app/stock/inventory-planner', label: 'Inventory Planner', icon: '📦', module: 'forecasting' },
       { to: '/app/stock/excess',            label: 'Excess Stock',      icon: '🗄️' },
+      { to: '/app/stock/bbe',               label: 'BBE Report',        icon: '⏰', module: 'bbe' },
+      { to: '/app/stock/quarantine',        label: 'Quarantine Report', icon: '🚫', module: 'quarantine' },
     ],
   },
   {
@@ -126,6 +130,7 @@ export const WAREHOUSE_NAV = [
   { type: 'link', to: '/app/extras-requests',        label: 'Requests for Extras', icon: '✨' },
   { type: 'link', to: '/app/calendar',               label: 'Warehouse Calendar',  icon: '📅' },
   { type: 'link', to: '/app/todo',                   label: 'To Do Lists',         icon: '✅' },
+  { type: 'link', to: '/app/admin/subscriptions',    label: 'Client Subscriptions', icon: '🔑' },
   { type: 'link', to: '/app/help',                   label: 'Help Guides',         icon: '❓' },
 ];
 

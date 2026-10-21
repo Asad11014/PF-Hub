@@ -361,6 +361,61 @@ async function ensureCoreSchema() {
     await query(`ALTER TABLE ${table_name} ALTER COLUMN ${column_name} TYPE NUMERIC`);
   }
 
+  // ── Subscription modules (server/entitlements.js) ─────────────────────────
+  // Catalogue of modules, per-client entitlements, an audit trail of every
+  // change, and small app-wide settings (e.g. default modules for new clients).
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS modules (
+      key                 TEXT PRIMARY KEY,
+      name                TEXT NOT NULL,
+      description         TEXT,
+      monthly_price_pence INTEGER,            -- NULL = price to be confirmed
+      currency            TEXT NOT NULL DEFAULT 'GBP',
+      is_core             BOOLEAN NOT NULL DEFAULT FALSE,
+      sort                INTEGER NOT NULL DEFAULT 0,
+      active              BOOLEAN NOT NULL DEFAULT TRUE
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS client_subscriptions (
+      client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      module_key  TEXT NOT NULL REFERENCES modules(key),
+      status      TEXT NOT NULL DEFAULT 'active',   -- active | trial | suspended | cancelled
+      starts_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ends_at     TIMESTAMPTZ,                       -- NULL = open-ended
+      price_pence INTEGER,                           -- per-client override; NULL = module price
+      billing_ref TEXT,                              -- future payment-provider reference
+      notes       TEXT,
+      updated_by  TEXT,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (client_id, module_key)
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS subscription_events (
+      id         SERIAL PRIMARY KEY,
+      at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      actor      TEXT NOT NULL,
+      action     TEXT NOT NULL,
+      client_id  INTEGER,
+      module_key TEXT,
+      before     JSONB,
+      after      JSONB
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key        TEXT PRIMARY KEY,
+      value      JSONB NOT NULL,
+      updated_by TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
   // ── User sessions (cache per API key) ─────────────────────────────────────
 
   await query(`

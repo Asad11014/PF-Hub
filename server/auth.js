@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const { mintsoftGet } = require('./mintsoft');
 const { runIncrementalSync } = require('./sync');
 const { queryOne } = require('./db');
+const entitlements = require('./entitlements');
 const { DEMO_WAREHOUSE, DEMO_CLIENTS } = require('./demo/constants');
 
 // In-memory session store: { sessionToken: { apiKey, clientId, username, ... } }
@@ -295,6 +296,7 @@ async function login(req, res) {
       isWarehouse,
       clients:    isWarehouse ? clients.map(c => ({ ID: c.ID || c.Id, Name: c.Name || c.ClientName || c.ShortName })) : [],
       warehouses,
+      ...(await moduleInfo(sessions[token])),
     }));
   } catch (err) {
     console.error('Login error:', err.message);
@@ -308,7 +310,7 @@ async function login(req, res) {
 // POST /api/demo-login
 // Creates a read-only demo session — no Mintsoft credentials, no API key.
 // Only available when DEMO_MODE is enabled on the deployment.
-function demoLogin(req, res) {
+async function demoLogin(req, res) {
   if (!process.env.DEMO_MODE) return res.json(404, { error: 'Not found' });
 
   // Warehouse persona: sees every demo client + the client picker.
@@ -334,6 +336,7 @@ function demoLogin(req, res) {
     isWarehouse: true,
     clients:     DEMO_CLIENTS,
     warehouses:  [DEMO_WAREHOUSE],
+    ...(await moduleInfo(sessions[token])),
   }));
 }
 
@@ -372,8 +375,21 @@ function logout(req, res) {
   res.end(JSON.stringify({ success: true }));
 }
 
+// Subscription info for the UI: the modules this session may use + the catalogue.
+// The server enforces access regardless (entitlements.checkAccess); this only
+// decides what the menu shows as available or locked.
+async function moduleInfo(session) {
+  try {
+    const [modules, moduleCatalog] = await Promise.all([entitlements.sessionModules(session), entitlements.catalog()]);
+    return { modules, moduleCatalog };
+  } catch (err) {
+    console.error('[entitlements] moduleInfo failed:', err.message);
+    return { modules: session?.isWarehouse ? [...entitlements.MODULE_KEYS] : [], moduleCatalog: [] };
+  }
+}
+
 // GET /api/me
-function me(req, res) {
+async function me(req, res) {
   const session = getSession(req);
   if (!session) return res.json(401, { error: 'Not authenticated' });
   res.json(200, {
@@ -382,7 +398,8 @@ function me(req, res) {
     isWarehouse: session.isWarehouse || false,
     demo:        session.demo        || false,
     clients:     session.clients     || [],
-    warehouses:  session.warehouses  || []
+    warehouses:  session.warehouses  || [],
+    ...(await moduleInfo(session)),
   });
 }
 

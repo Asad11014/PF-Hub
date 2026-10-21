@@ -151,21 +151,25 @@ function flattenRoutes(node) {
 
 // A single client-nav node — either a leaf link or a (possibly nested) group.
 function NavNode({ node, closeSidebar, depth }) {
+  const { hasModule } = useSession()
   if (node.items) return <CollapsibleGroup group={node} closeSidebar={closeSidebar} depth={depth} />
+  const locked = node.module && !hasModule(node.module)
   return (
     <NavLink
       to={node.to}
       onClick={closeSidebar}
       style={{ paddingLeft: `${12 + depth * 16}px` }}
+      title={locked ? 'Add-on — not active on your account' : undefined}
       className={({ isActive }) => clsx(
         'flex items-center gap-2 pr-3 py-1.5 text-[12px] transition-all no-underline mx-2 rounded border-l-2',
         isActive
           ? 'bg-white/10 text-white font-semibold border-gold'
-          : 'text-white/70 hover:bg-white/5 hover:text-white border-transparent'
+          : clsx(locked ? 'text-white/45' : 'text-white/70', 'hover:bg-white/5 hover:text-white border-transparent')
       )}
     >
       <span className="text-sm flex-shrink-0">{node.icon}</span>
       <span className="flex-1 truncate">{node.clientLabel || node.label}</span>
+      {locked && <span className="text-[10px] flex-shrink-0" aria-label="Add-on">🔒</span>}
     </NavLink>
   )
 }

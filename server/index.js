@@ -8,6 +8,7 @@ const path      = require('path');
 const fs        = require('fs');
 const auth      = require('./auth');
 const { requireScope } = require('./scope');
+const entitlements = require('./entitlements');
 const reports   = require('./reports/index');
 const dashboard = require('./reports/dashboard');
 const calendar    = require('./calendar');
@@ -31,6 +32,7 @@ ensureCoreSchema()
     abandonStaleJobs(),
   ]))
   .then(() => { if (DEMO_MODE) return seedDemo(); })
+  .then(() => entitlements.ensureEntitlements())
   .catch(e => console.error('[schema] Bootstrap error:', e.message));
 
 // ── Scheduled sync ────────────────────────────────────────────────────────────
@@ -67,6 +69,17 @@ const server = http.createServer(async (req, res) => {
   try {
     const { pathname } = url;
 
+    // ── Subscription modules ──────────────────────────────────────────────────
+    // Client users need Basic for every data route, plus the add-on a path
+    // belongs to (server/entitlements.js). Warehouse users are never limited.
+    if (pathname.startsWith('/api/')) {
+      const s = auth.getSession(req);
+      if (s && !s.isWarehouse) {
+        const denied = await entitlements.checkAccess(s, pathname);
+        if (denied) return res.json(403, denied);
+      }
+    }
+
     // ── Auth routes ───────────────────────────────────────────────────────────
     if (pathname === '/api/login'      && req.method === 'POST') return auth.login(req, res);
     if (pathname === '/api/demo-login' && req.method === 'POST') return auth.demoLogin(req, res);
@@ -78,6 +91,35 @@ const server = http.createServer(async (req, res) => {
       const session = requireScopedSession(req, res, url);
       if (!session) return;
       return dashboard.run(req, res, url, session);
+    }
+
+    // ── Subscription admin (warehouse users) ──────────────────────────────────
+    if (pathname.startsWith('/api/admin/')) {
+      const session = auth.requireSession(req, res);
+      if (!session) return;
+      if (!session.isWarehouse) return res.json(403, { error: 'Warehouse users only' });
+      if (blockDemoWrite(session, req, res)) return;
+      const actor = session.username || 'warehouse';
+
+      if (pathname === '/api/admin/subscriptions' && req.method === 'GET') {
+        return res.json(200, await entitlements.adminOverview());
+      }
+      if (pathname === '/api/admin/subscriptions' && req.method === 'PUT') {
+        const b = await req.json().catch(() => ({}));
+        const r = await entitlements.setSubscription(b.clientId, b.module, b, actor);
+        return res.json(r.error ? 400 : 200, r);
+      }
+      const modMatch = pathname.match(/^\/api\/admin\/modules\/([a-z_]+)$/);
+      if (modMatch && req.method === 'PUT') {
+        const b = await req.json().catch(() => ({}));
+        const r = await entitlements.updateModule(modMatch[1], b, actor);
+        return res.json(r.error ? 400 : 200, r);
+      }
+      if (pathname === '/api/admin/default-modules' && req.method === 'PUT') {
+        const b = await req.json().catch(() => ({}));
+        return res.json(200, await entitlements.setDefaultModules(b.modules, actor));
+      }
+      return res.json(404, { error: 'Not found' });
     }
 
     // ── Report list ───────────────────────────────────────────────────────────

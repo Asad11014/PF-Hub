@@ -166,6 +166,53 @@ function attachLogging(page, persona) {
     await ctx.close();
   }
 
+  // ── Subscription modules ──────────────────────────────────────────────────
+  // Switches modules off for the test client via the warehouse admin API,
+  // checks the server blocks and the UI shows the add-on / subscription pages,
+  // then restores the original entitlements.
+  {
+    const CID = parseInt(process.env.TEST_CLIENT_ID || '10');
+    const wh = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const cl = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await login(wh, '__wh__');
+    await login(cl, '__client__');
+    const expectText = (label, text, needle) => results.expectations.push({ label, expected: [`text "${needle}"`], got: text.includes(needle) ? 'present' : 'absent', ok: text.includes(needle) });
+    const pageText = async (ctx, name, url) => {
+      const p = await ctx.newPage();
+      await visit(p, name, url);
+      const t = await p.evaluate(() => document.body.innerText).catch(() => '');
+      await p.close();
+      return t;
+    };
+
+    const overview = await api(wh, 'WH GET admin/subscriptions', '/api/admin/subscriptions', {}, { status: [200] });
+    const clients = overview.body?.clients || [];
+    const allGranted = clients.length > 0 && clients.every(c => c.effective.includes('core') && c.effective.includes('forecasting'));
+    results.expectations.push({ label: `every client has Basic + Forecasting after seed (${clients.length} clients)`, expected: ['all'], got: allGranted ? 'all' : 'missing', ok: allGranted });
+    const original = clients.find(c => c.id === CID)?.subscriptions || {};
+    const put = (module, status) => api(wh, `WH set ${module}=${status}`, '/api/admin/subscriptions', { method: 'PUT', data: { clientId: CID, module, status } }, { status: [200] });
+
+    await api(cl, 'CLIENT forecasting with module', '/api/forecasting/config', {}, { status: [200] });
+    await api(cl, 'CLIENT PUT admin/subscriptions', '/api/admin/subscriptions', { method: 'PUT', data: { clientId: CID, module: 'bbe', status: 'active' } }, { status: [403] });
+    await api(cl, 'CLIENT BBE without module', '/api/stock/bbe', {}, { status: [403] });
+
+    await put('forecasting', 'cancelled');
+    await api(cl, 'CLIENT forecasting after switch-off', '/api/forecasting/config', {}, { status: [403] });
+    expectText('CLIENT Inventory Planner shows add-on page', await pageText(cl, 'cl-15-planner-locked', '/app/stock/inventory-planner'), 'is an add-on');
+
+    await put('core', 'cancelled');
+    await api(cl, 'CLIENT data route without Basic', '/api/report/best-sellers?warehouseId=3&dateFrom=2026-05-01&dateTo=2026-05-31', {}, { status: [403] });
+    expectText('CLIENT without Basic sees subscription screen', await pageText(cl, 'cl-16-no-subscription', '/app'), 'Subscription required');
+
+    for (const m of ['core', 'forecasting']) {
+      const o = original[m] || { status: 'active' };
+      await api(wh, `WH restore ${m}`, '/api/admin/subscriptions', { method: 'PUT', data: { clientId: CID, module: m, status: o.status, ends_at: o.ends_at, price_pence: o.price_pence, notes: o.notes } }, { status: [200] });
+    }
+    await api(cl, 'CLIENT forecasting after restore', '/api/forecasting/config', {}, { status: [200] });
+    expectText('WH admin page lists clients', await pageText(wh, 'wh-20-client-subscriptions', '/app/admin/subscriptions'), 'Client Subscriptions');
+    await wh.close(); await cl.close();
+  }
+
   // ── Unauthenticated ───────────────────────────────────────────────────────
   {
     const ctx = await browser.newContext();
@@ -174,6 +221,7 @@ function attachLogging(page, persona) {
     await api(ctx, 'ANON /api/report/best-sellers', '/api/report/best-sellers?warehouseId=3', {}, { status: [401] });
     await api(ctx, 'ANON /api/sync/status', '/api/sync/status', {}, { status: [401] });
     await api(ctx, 'ANON POST /api/sync/reconcile', '/api/sync/reconcile', { method: 'POST' }, { status: [401] });
+    await api(ctx, 'ANON GET /api/admin/subscriptions', '/api/admin/subscriptions', {}, { status: [401] });
     await ctx.close();
   }
 

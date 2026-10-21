@@ -22,9 +22,13 @@ export function SessionProvider({ children }) {
       .finally(() => setLoading(false))
   }, [])
 
+  // Subscription modules this session may use (warehouse users have all).
+  // The server enforces access; this only decides what the UI shows as locked.
+  const hasModule = key => !!session && (session.isWarehouse || (session.modules || []).includes(key))
+
   return (
     <SessionContext.Provider value={{
-      session, setSession,
+      session, setSession, hasModule,
       warehouseId, setWarehouseId,
       selectedClientId, setSelectedClientId,
       loading
