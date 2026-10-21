@@ -327,6 +327,40 @@ async function ensureCoreSchema() {
     )
   `);
 
+  // Sync engine (server/sync/): heartbeat for zombie detection, per-step
+  // results and the Mintsoft call count of each run.
+  await query(`ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS steps JSONB`);
+  await query(`ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS api_calls INTEGER`);
+
+  // Incremental cursors: an entity's cursor is the start time of the last run
+  // in which that entity synced successfully.
+  await query(`
+    CREATE TABLE IF NOT EXISTS sync_state (
+      entity          TEXT PRIMARY KEY,
+      cursor          TIMESTAMPTZ,
+      last_success_at TIMESTAMPTZ,
+      last_job_id     INTEGER,
+      rows_last_run   INTEGER
+    )
+  `);
+
+  // Mintsoft TotalStockLevel (physical, including allocated). qty_on_hand stays
+  // Mintsoft "Level" (free stock), which is what the reports use.
+  await query(`ALTER TABLE product_stock_levels ADD COLUMN IF NOT EXISTS qty_total INTEGER`);
+
+  // Mirrored money/weight columns store Mintsoft's exact values (it keeps e.g.
+  // item discounts to 3 dp), so drop the NUMERIC(p,s) limits. Widening only.
+  const constrained = await query(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_schema = current_schema() AND data_type = 'numeric' AND numeric_precision IS NOT NULL
+       AND table_name = ANY($1)`,
+    [['orders', 'order_items', 'products', 'asns', 'invoices', 'invoice_accruals']]
+  );
+  for (const { table_name, column_name } of constrained) {
+    await query(`ALTER TABLE ${table_name} ALTER COLUMN ${column_name} TYPE NUMERIC`);
+  }
+
   // ── User sessions (cache per API key) ─────────────────────────────────────
 
   await query(`
@@ -423,6 +457,8 @@ async function ensureCoreSchema() {
   await query(`CREATE INDEX IF NOT EXISTS asns_updated_at_idx              ON asns (updated_at DESC)`);
   await query(`CREATE INDEX IF NOT EXISTS invoices_client_date_idx          ON invoices (client_id, invoice_date DESC)`);
   await query(`CREATE INDEX IF NOT EXISTS sync_jobs_started_at_idx          ON sync_jobs (started_at DESC)`);
+  await query(`CREATE INDEX IF NOT EXISTS asn_items_asn_idx                 ON asn_items (asn_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS invoices_date_idx                 ON invoices (invoice_date)`);
 
   // ── Forecasting / Inventory Planner ─────────────────────────────────────────
   // Per-client demand forecasting + reorder planning. See docs/forecasting-module-plan.html.

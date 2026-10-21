@@ -36,6 +36,18 @@ SELECT client_id, period_month, updated_at FROM invoice_accruals ORDER BY period
 \echo '=== asns ==='
 SELECT COUNT(*) AS asns, MAX(booked_in_date)::date AS max_booked, MAX(synced_at), COUNT(*) FILTER (WHERE client_id IS NULL) AS null_client FROM asns;
 
+\echo '=== integrity: rows with no client / unknown client / unknown product (all should be 0) ==='
+SELECT 'orders' AS t, COUNT(*) FILTER (WHERE client_id IS NULL) AS null_client FROM orders
+UNION ALL SELECT 'products', COUNT(*) FILTER (WHERE client_id IS NULL) FROM products
+UNION ALL SELECT 'asns', COUNT(*) FILTER (WHERE client_id IS NULL) FROM asns
+UNION ALL SELECT 'invoices', COUNT(*) FILTER (WHERE client_id IS NULL) FROM invoices
+UNION ALL SELECT 'stock', COUNT(*) FILTER (WHERE client_id IS NULL) FROM product_stock_levels;
+SELECT COUNT(*) AS order_items_without_product FROM order_items WHERE product_id IS NULL;
+SELECT COUNT(*) AS zombie_jobs FROM sync_jobs WHERE status = 'running' AND COALESCE(heartbeat_at, started_at) < NOW() - INTERVAL '15 minutes';
+
+\echo '=== sync cursors ==='
+SELECT entity, cursor, last_success_at, last_job_id, rows_last_run FROM sync_state ORDER BY entity;
+
 \echo '=== forecast runs ==='
 SELECT id, client_id, status, stats->>'skus' AS skus, stats->>'horizonWmape' AS horizon_wmape, started_at FROM forecast_runs ORDER BY id DESC LIMIT 5;
 

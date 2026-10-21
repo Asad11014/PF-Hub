@@ -10,7 +10,8 @@
     "dev": "concurrently -n server,client -c blue,green \"npm run dev:server\" \"npm run dev:client\"",
     "build": "npm install --include=dev && npm ci --include=dev --prefix client && npm run build --prefix client",
     "install:client": "npm install --prefix client",
-    "seed:demo": "node server/demo/seed-demo.js --force"
+    "seed:demo": "node server/demo/seed-demo.js --force",
+    "test": "node --test \"server/**/*.test.js\""
   },
   "dependencies": {
     "dotenv": "^17.4.2",

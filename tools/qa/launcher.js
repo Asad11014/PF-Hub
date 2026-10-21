@@ -30,8 +30,11 @@ const syncPath = require.resolve(path.join(ROOT, 'server/sync.js'));
 const realSync = require(syncPath);
 require.cache[syncPath].exports = {
   ...realSync,
+  runSync:            async (mode) => { console.log(`[qa] runSync(${mode}) suppressed`); return { ok: true, stub: true }; },
   runFullSync:        async () => { console.log('[qa] runFullSync suppressed'); return { ok: true, stub: true }; },
   runIncrementalSync: async () => { console.log('[qa] runIncrementalSync suppressed'); return { ok: true, stub: true }; },
+  runReconcile:       async () => { console.log('[qa] runReconcile suppressed'); return { ok: true, stub: true }; },
+  startScheduler:     () => { console.log('[qa] scheduler suppressed'); },
 };
 
 // ── (1) stub Mintsoft auth for synthetic usernames ──────────────────────────

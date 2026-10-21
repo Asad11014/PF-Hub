@@ -18,7 +18,7 @@ const forecasting = require('./forecasting/api');
 const storage     = require('./storage');
 const { sendEmail } = require('./email');
 const { ensureCoreSchema } = require('./schema');
-const { runFullSync, runIncrementalSync, getSyncStatus, abandonStaleJobs } = require('./sync');
+const { runFullSync, runIncrementalSync, runReconcile, getSyncStatus, abandonStaleJobs, startScheduler } = require('./sync');
 const { query, queryOne } = require('./db');
 const { seedDemo } = require('./demo/seed-demo');
 
@@ -33,40 +33,9 @@ ensureCoreSchema()
   .then(() => { if (DEMO_MODE) return seedDemo(); })
   .catch(e => console.error('[schema] Bootstrap error:', e.message));
 
-// ── Midnight cron ─────────────────────────────────────────────────────────────
-// Nightly sync using the admin API key — rolling 7-day window + 90-day ASN window.
-function scheduleMidnightSync() {
-  const adminKey = process.env.MINTSOFT_ADMIN_KEY;
-  if (!adminKey) {
-    console.log('[cron] MINTSOFT_ADMIN_KEY not set — nightly sync disabled');
-    return;
-  }
-
-  function msUntilMidnight() {
-    const now  = new Date();
-    const next = new Date(now);
-    next.setHours(24, 0, 0, 0);
-    return next - now;
-  }
-
-  function scheduleNext() {
-    const delay = msUntilMidnight();
-    console.log(`[cron] Next nightly sync in ${Math.round(delay / 60000)} minutes`);
-    setTimeout(async () => {
-      console.log('[cron] Running nightly incremental sync…');
-      try {
-        await runIncrementalSync({ apiKey: adminKey, triggeredBy: 'cron' });
-      } catch (err) {
-        console.error('[cron] Nightly sync error:', err.message);
-      }
-      scheduleNext();
-    }, delay);
-  }
-
-  scheduleNext();
-}
-
-scheduleMidnightSync();
+// ── Scheduled sync ────────────────────────────────────────────────────────────
+// Hourly / nightly / weekly-full Mintsoft sync with the admin key (server/sync/runner.js).
+startScheduler();
 
 const DIST_DIR = path.join(__dirname, '../client/dist');
 const PORT     = process.env.PORT || 3001;
@@ -138,6 +107,17 @@ const server = http.createServer(async (req, res) => {
         const fn = full ? runFullSync : runIncrementalSync;
         await fn({ apiKey: session.apiKey, triggeredBy: 'manual' });
       });
+      return;
+    }
+
+    // Compare the database with Mintsoft (read-only); result appears in /api/sync/status.
+    if (pathname === '/api/sync/reconcile' && req.method === 'POST') {
+      const session = auth.requireSession(req, res);
+      if (!session) return;
+      if (session.demo) return res.json(200, { ok: true, demo: true, message: 'Sync is disabled in the demo' });
+      if (!session.isWarehouse) return res.json(403, { error: 'Warehouse users only' });
+      res.json(202, { ok: true, message: 'Reconcile started; see /api/sync/status → lastReconcile' });
+      setImmediate(() => runReconcile({ triggeredBy: 'manual' }).catch(err => console.error('[sync] reconcile failed:', err.message)));
       return;
     }
 

@@ -160,6 +160,7 @@ function attachLogging(page, persona) {
     await api(ctx, 'CLIENT products/overview?clientId=6', '/api/products/overview?clientId=6', {}, { status: [200, 403] });
     await api(ctx, 'CLIENT sync/status', '/api/sync/status', {}, { status: [403] });
     await api(ctx, 'CLIENT POST sync', '/api/sync', { method: 'POST', data: { full: true } }, { status: [403] });
+    await api(ctx, 'CLIENT POST sync/reconcile', '/api/sync/reconcile', { method: 'POST' }, { status: [403] });
     await api(ctx, 'CLIENT PUT forecasting/config', '/api/forecasting/config', { method: 'PUT', data: { settings: { serviceLevel: 0.9 } } }, { status: [403] });
     await api(ctx, 'CLIENT dashboard clientId=6', '/api/dashboard?warehouseId=3&clientId=6', {}, { status: [200, 403] });
     await ctx.close();
@@ -172,6 +173,7 @@ function attachLogging(page, persona) {
     await api(ctx, 'ANON /proxy relay (must not exist)', '/proxy/api/Warehouse', { headers: { 'ms-apikey': 'bogus-key-000' } }, { status: [404] });
     await api(ctx, 'ANON /api/report/best-sellers', '/api/report/best-sellers?warehouseId=3', {}, { status: [401] });
     await api(ctx, 'ANON /api/sync/status', '/api/sync/status', {}, { status: [401] });
+    await api(ctx, 'ANON POST /api/sync/reconcile', '/api/sync/reconcile', { method: 'POST' }, { status: [401] });
     await ctx.close();
   }
 

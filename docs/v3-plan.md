@@ -560,6 +560,7 @@ Executors append one entry per stage: date, branch, model used, DoD evidence (ta
 |---|---|---|---|---|---|
 | — | 2026-09-23 | — | Fable 5.1 | Review complete; harness in `tools/qa`; this plan | — |
 | S0 | 2026-09-23 | `v3/s0-lockdown` | Opus 5.5 | Harness 13/13 PASS (was 7/13); revenue May 2026 12 clients £22,319.14; cost breakdown dates fixed; see *S0 evidence* below | F-01, F-02, F-03, F-04, F-05, F-07 (fail-closed part), F-08, F-14, F-28; partial: F-06, F-16 |
+| S1 + S3 data core | 2026-10-21 | `v3/s1-sync-engine` | Opus 5.5 | New engine `server/sync/`; local full sync 85 s / 266 calls; reconcile 0 missing / 0 extra / 0 drift on all entities; hourly 5 s / 27 calls; harness 15/15 PASS; see *S1 evidence* | F-10, F-11, F-12, F-13, F-15, F-16, F-17, F-18, F-19 (deleted rows), F-20 (storage + session TZ); partial: F-22 |
 
 #### S0 evidence
 
@@ -603,3 +604,47 @@ Executors append one entry per stage: date, branch, model used, DoD evidence (ta
 - `tools/qa/.gitignore` added (`node_modules/`, `shots/`, `results.json` — results contain customer names from API bodies).
 
 **Open questions**: confirm `NODE_ENV`/`RENDER` on the production service; whether "Unassigned" revenue rows are wanted or should wait for F-13 (S1).
+
+#### S1 evidence
+
+Scope note: the owner asked for an exact, continuously fresh mirror of Mintsoft for every client. Instead of the S1 patch, which S3 would have replaced, this delivers the data half of S3 (§4.2): new engine, cursors, lock, heartbeat, bulk writes, placeholder clients, deletion sweep, reconcile, scheduler. Not done here (still S3/S5): `stock_snapshots`, `product_bundles`, `invoice_orders`/`invoice_lines`, `period_month`, admin sync page, removal of the sidebar sync buttons, `SYNC_MODE=external`. Runbook: `docs/sync.md`.
+
+**Local runs** (local DB restored from the 28 Sep state; Mintsoft live; read-only GETs only)
+
+| Run | Result | Time | API calls |
+|---|---|---|---|
+| Old engine, nightly 25 Sep → 1 Oct | 0 successes (5 partial, 2 error: ECONNRESET, stock FK) | 41–58 min | thousands |
+| full #1 (job 62) | success; removed 131 orders, 61 products, 6 ASNs, 8 invoices that Mintsoft deleted (all 206 verified 404 via `/api/<entity>/{id}`) | 80 s | 270 |
+| full #2 / #3 (jobs 63, 64) | success, 0 deletions (stable) | 93 s / 85 s | 266 |
+| hourly ×2 (jobs 66, 67) | success; picked up 32 changed orders and 1 new product | 5.5 s / 7.5 s | 27 |
+
+**Reconcile after full #3** (`node server/sync/cli.js reconcile`, every column compared, exact numerics)
+
+| Entity | Mintsoft | DB | Matched | Missing | Extra | Drift | Changed since sync |
+|---|---|---|---|---|---|---|---|
+| clients | 17 | 22 | 17 | 0 | 0 | 0 | 0 |
+| products | 3,477 | 3,477 | 3,477 | 0 | 0 | 0 | 0 |
+| stock | 3,477 | 3,477 | 3,477 | 0 | 0 | 0 | 0 |
+| orders | 18,375 | 18,375 | 18,372 | 0 | 0 | 0 | 3 |
+| order items | 35,428 | 35,428 | 35,427 | 0 | 0 | 0 | 1 |
+| ASNs | 411 | 411 | 411 | 0 | 0 | 0 | 0 |
+| ASN items | 2,109 | 2,109 | 2,109 | 0 | 0 | 0 | 0 |
+| invoices | 207 | 207 | 207 | 0 | 0 | 0 | 0 |
+| accruals (Oct) | 22 | 22 | 22 | 0 | 0 | 0 | 0 |
+
+Orders per month (London order date) match for all 16 months (2025-07 → 2026-10). The 5 extra clients are inactive: Mokee (6), So My Home (30), and placeholders 5, 9, 11, which Mintsoft no longer returns but which 36 of its invoices still reference.
+
+**diag.sql integrity**: NULL client on orders/products/ASNs/invoices/stock = 0 (was 387 orders, 352 products, 16 ASNs, 11+ invoices); order items without product = 0; zombie jobs = 0; 22 clients incl. new 30–34 (Luff Sleep 614 orders, 278 products, 10,042 units).
+
+**Defects found and fixed on the way**
+- Mintsoft client `Active` is the string `"Y"`, so the old code marked every client active. Inactive clients are now `active=false`.
+- Mintsoft's status lookup returns codes (`DESPATCHED`). Readable names are kept, because reports filter on them.
+- Mintsoft stores some item discounts to 3 dp (1.275), and `NUMERIC(12,2)` rounded them. Mirrored numeric columns are now unrestricted `NUMERIC` (widening only).
+- The old upserts left most columns unchanged on conflict, and `|| null` turned real zeros into NULL. Every column is now rewritten with exact values.
+- Stock: `TotalStockLevel` is now stored as `qty_total` (physical), and `qty_allocated` = total − Level. `qty_on_hand` keeps its meaning (Level) for the reports.
+
+**Checks**: `npm test` 8/8 (London date parsing incl. BST/GMT switches, mappers, exact comparison); `node --check` all changed files; harness 15/15 PASS (adds client 403 / anonymous 401 on `POST /api/sync/reconcile`), 33 pages, console errors 1 = baseline; Revenue May 2026 still 12 clients, £22,319.14.
+
+**Production rollout (at the gate)**: on the first boot the engine runs `full` and then `reconcile` automatically (~5 min). The result appears in `GET /api/sync/status` → `lastReconcile` (warehouse login). After that: hourly at :15, nightly 02:15, full + reconcile Sundays 03:15 (Europe/London).
+
+**Open questions**: names for deleted clients 5, 9, 11 (Mintsoft cannot supply them); whether reports should move from `qty_on_hand` (free) to `qty_total` (physical) for storage and volume figures (S5); if the Render plan sleeps when idle, scheduled runs pause until the next request (boot catch-up then runs an hourly).

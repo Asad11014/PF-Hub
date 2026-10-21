@@ -10,6 +10,10 @@ const pool = new Pool({
   ssl: IS_LOCAL ? false : { rejectUnauthorized: false },
   max: 10,
   idleTimeoutMillis: 30_000,
+  // Bucket dates by UK days (Mintsoft's and the business's calendar), whatever
+  // time zone the database server defaults to (Render: UTC). Runs before the
+  // connection is handed out.
+  onConnect: (client) => client.query(`SET TIME ZONE 'Europe/London'`),
 });
 
 pool.on('error', (err) => {
