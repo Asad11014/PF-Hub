@@ -97,9 +97,9 @@ Backfill: about 207 confirmed invoices × 5 detail calls ≈ 1,000 read-only cal
 **Model**: Opus 5.5 (rule semantics).
 **Work**: order-rule evaluator (all `ConditionOptions` fields we can compute; unsupported ones reported, never guessed); order volume/weight from product data; rework-price inference + confirmation screen; picking/admin/goods-in expected charges; checks B5–B8, C9–C12, D14; accuracy per client.
 **DoD**
-- [ ] Unit tests for every operator and the fields used by current client rules.
-- [ ] Serendipity Sep + Oct 2026: the engine reproduces billed rework on ≥ 98 % of orders; every other order is listed with the reason.
-- [ ] Picking expectation matches billed picking on ≥ 98 % of orders for three clients with different picking methods.
+- [x] Unit tests for every operator and the fields used by current client rules.
+- [x] Serendipity Sep + Oct 2026: the engine reproduces billed rework on ≥ 98 % of orders; every other order is listed with the reason.
+- [x] Picking expectation matches billed picking on ≥ 98 % of orders for three clients with different picking methods.
 
 ### I3 — Review workflow, overview and preview
 **Model**: Sonnet 5 (UI from this spec); Opus 5.5 reviews the permission checks and money maths.
@@ -121,6 +121,7 @@ Backfill: about 207 confirmed invoices × 5 detail calls ≈ 1,000 read-only cal
 | Stage | Date | Branch | Model | Evidence |
 |---|---|---|---|---|
 | I1 | 2026-11-04 | `v3/i1-invoice-audit` | Opus 5.5 | Backfill 212 invoices → 17,570 order lines + 1,666 other lines in 25–27 s (1,060 calls); reconcile `invoice_detail_all`: 0 missing / extra / drift on every line and all 212 invoice headers; integrity 211/212 invoices equal their lines to the penny (all since Jul 2025; the exception is a Feb 2025 "bulk adjustment" at −£0.02 rounding over 139 goods-in lines); coverage Aug–Oct 2026: 0 unbilled, 0 double-billed, 0 billed while cancelled/undespatched, 20 zero-charge or noted lines; `npm test` 18/18; harness 72/72 (22 new access checks) |
+| I2 | 2026-11-04 | `v3/i2-rules-engine` | Opus 5.5 | Serendipity rework Aug+Sep 2026 (Oct not yet invoiced): 801/810 reproduced (98.9 %), every other order listed with its reason (5 product edited after billing, 4 manually zeroed; 4 more uncertain, missing dimensions); since Feb 2026 6,356/6,375 (99.7 %). Picking Aug+Sep: Mexeco (per item) 141/141, Afida (per order + SKU + unit) 115/115, Serendipity (per order line) 810/810. `npm test` 30/30; harness 82/82 |
 
 I1 notes: how Mintsoft builds an invoice (worked out from the data, not documented by Mintsoft)
 - Order-line fields sum into their categories: picking = Σ `TotalPickingCost` (incl. extra picking), postage = Σ `PostageCost`, rework, packaging, admin, VAT-free postage likewise.
@@ -131,3 +132,14 @@ I1 notes: how Mintsoft builds an invoice (worked out from the data, not document
 - Order-line `Comments` lists the rework items charged ("<item>- X <qty>", the name can be blank). Other lines are typed notes: 41 across all invoices, e.g. "Zerod All Costs", "Short Shipped …". One rework item is literally named "pricing need adding" (for I2's price review).
 - `CostPostageCost` is 0 when Mintsoft does not know the courier cost (most APC Next Day, all pallet services, many FedEx). Margin is calculated only where it is known, and the rest are counted (462 orders Aug–Oct).
 - A line's `InvoiceDate` is 2.5–9.5 h after despatch. Orders despatched within 12 h of a client's latest billing run count as "awaiting next invoice", not unbilled. On 4 Nov 2026, October was not yet invoiced for 14 clients.
+
+I2 notes: what the data showed (and the engine now uses)
+- Order volume = Σ width × height × depth × qty / 1,000,000 (Mintsoft dimensions are cm). It reproduces Serendipity's SW-BOX / DW-BOX choice on 98.9 % of Aug–Sep orders.
+- List conditions (SKUs, names, categories) match when any item matches. This fits Luff Sleep's courier rules better (171/176 vs 170/176 for "joined list").
+- Rules count from their last edit. An order placed before a rule was edited is uncertain only if it disagrees with today's rules: Luff Sleep's BEDDING and SMALL-SUGAR rules date from 16–26 Oct 2026, so their absence from the September invoice is not leakage.
+- Rework prices are not in the API. They are learned per month from single-item orders (second pass: billed minus the other items' known price), and an item can change price mid-month (SW-BOX £0.18 → £0.14 in Feb 2026). Users can confirm a price from a date (`audit_rework_prices`).
+- Picking: Mintsoft exposes only today's rate card, and rates have changed (Serendipity was billed £1.75 + £0.39 per extra unit until now; its card says £1.45 per order line, which is what its wholesale orders pay). Each order is checked against today's card and against the pattern learned for its month and channel. SKUs never charged are learned from billing (spray heads, pipette and spoon at Serendipity; rule-added leaflets at Ovviovita). Clients whose pattern is not reproduced (Ovviovita 49 %, Amaura 41 %) get no order-level picking flags.
+- Bulk orders billed below the per-unit rate (e.g. Abbots FBA 230 units at £15.50 vs £88.29) and repeated flat charges (£15 / £15.50 caps) are notes, not warnings.
+- Hand-added rework at £0.00 is flagged with the item's usual price (Lawful London: 15 lines).
+
+Moved to I3: goods-in rate checks (B7), owner-defined audit rules (C11), postage outliers (D14), plus the review workflow already planned there.

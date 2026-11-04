@@ -9,30 +9,12 @@
 
 const { query, queryOne } = require('./db');
 const permissions = require('./permissions');
+const engine = require('./audit-engine');
 
 const r2 = v => Math.round((Number(v) || 0) * 100) / 100;
 const n = v => (v == null ? null : Number(v));
 
-// An order line's comments list the rework items Mintsoft charged, one per line,
-// as "<item name>- X <qty>" (the name can be blank). Any other line was typed by
-// a person, e.g. "Short Shipped - …", "Took us 3 Hours @ £40 per hour".
-const REWORK_LINE = /^(.*?)\s*-\s*X\s*(\d+)\s*$/i;
-const REWORK_LINE_SQL = '-\\s*X\\s*\\d+\\s*$';
-const HAS_MANUAL_LINE_SQL = col => `EXISTS (SELECT 1 FROM regexp_split_to_table(COALESCE(${col}, ''), E'\\r?\\n') AS ln
-                                           WHERE btrim(ln) <> '' AND ln !~* '${REWORK_LINE_SQL}')`;
-const ZEROED = /zero|zerod|no charge|free of charge|waive/i;
-
-function parseComments(text) {
-  const reworkItems = [], notes = [];
-  for (const raw of String(text || '').split(/\r?\n/)) {
-    const ln = raw.trim();
-    if (!ln) continue;
-    const m = ln.match(REWORK_LINE);
-    if (m) reworkItems.push({ item: m[1].trim() || null, qty: parseInt(m[2], 10) });
-    else notes.push(ln);
-  }
-  return { reworkItems, notes };
-}
+const { parseComments, HAS_MANUAL_LINE_SQL, ZEROED } = require('./audit-comments');
 // Mintsoft bills an order hours after despatch; orders despatched within this
 // window before a client's latest billing run may land on the next invoice.
 const CUTOFF_HOURS = 12;
@@ -183,6 +165,11 @@ async function overview(req, res, url) {
       },
     };
   });
+  // Expected-vs-billed checks (stage I2), per client, cached by the engine.
+  for (const cid of [...new Set(invoices.map(i => i.clientId).filter(Boolean))]) {
+    const ca = await engine.clientAudit(cid);
+    for (const i of invoices.filter(x => x.clientId === cid)) i.expected = ca.byInvoice[i.id] || { warnings: 0, info: 0, under: 0, over: 0, codes: {} };
+  }
   const unbilled = await unbilledOrders(range, clientId);
   return res.json(200, {
     range, clients, historyStart: hist, invoices,
@@ -350,6 +337,13 @@ async function invoiceDetail(req, res, url, id) {
     };
   });
 
+  const ca = inv.client_id ? await engine.clientAudit(inv.client_id) : null;
+  const month = inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('en-CA', { timeZone: 'Europe/London' }).slice(0, 7) : null;
+  for (const o of orders) {
+    const e = ca?.lines.get(o.lineId);
+    o.expected = e?.expected || null;
+    if (e) o.flags.push(...e.flags);
+  }
   const sumLines = col => r2(lines.reduce((s, l) => s + (Number(l[col]) || 0), 0));
   const orderSums = Object.fromEntries(CATEGORIES.filter(c => c.line).map(c => [c.line, sumLines(c.line)]));
   const extraSums = {}, extraCounts = {};
@@ -360,6 +354,13 @@ async function invoiceDetail(req, res, url, id) {
   }
   const categories = buildCategories(inv, { orderSums, orderLines: lines.length, extraSums, extraCounts }, beforeHistory);
   const integ = integrityOf(categories);
+  const engineSummary = ca ? {
+    hasReworkRules: ca.hasReworkRules,
+    picking: ca.picking.months[month] || null, pickingMethod: ca.picking.method, excludedSkus: ca.picking.excludedSkus,
+    rework: ca.accuracy.rework?.byMonth?.[month] || null,
+    totals: ca.byInvoice[inv.id] || { warnings: 0, info: 0, under: 0, over: 0, codes: {} },
+    minConfidence: engine.MIN_CONFIDENCE,
+  } : null;
   const flagCounts = {};
   orders.forEach(o => o.flags.forEach(f => { flagCounts[f.code] = (flagCounts[f.code] || 0) + 1; }));
 
@@ -382,6 +383,7 @@ async function invoiceDetail(req, res, url, id) {
       };
     })(),
     flagCounts,
+    engine: engineSummary,
     orders,
     extras: extras.map(e => ({
       kind: e.kind, id: e.id, amount: n(e.amount), itemType: e.item_type, chargeType: e.charge_type, referenceId: e.reference_id,
@@ -412,8 +414,48 @@ async function access(req, res, url, session) {
   return res.json(405, { error: 'Method not allowed' });
 }
 
+// ── Rates & rules for one client (stage I2) ──────────────────────────────────
+
+async function clientRates(req, res, url, id) {
+  const client = await queryOne(`SELECT id, name, active FROM clients WHERE id = $1`, [id]);
+  if (!client) return res.json(404, { error: 'Client not found' });
+  const ca = await engine.clientAudit(id);
+  const { lines, byInvoice, ...rest } = ca;
+  return res.json(200, { client, ...rest, minConfidence: engine.MIN_CONFIDENCE });
+}
+
+// Confirm (or correct) a rework item price from a date; DELETE removes one.
+async function clientPrices(req, res, url, id, session) {
+  if (req.method === 'PUT') {
+    const b = await req.json().catch(() => ({}));
+    const price = Number(b.price);
+    if (!b.itemKey || !/^(rule|name):/.test(b.itemKey)) return res.json(400, { error: 'itemKey is required' });
+    if (!Number.isFinite(price) || price < 0) return res.json(400, { error: 'price must be zero or more' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(b.effectiveFrom || '')) return res.json(400, { error: 'effectiveFrom must be a date (YYYY-MM-DD)' });
+    await query(
+      `INSERT INTO audit_rework_prices (client_id, item_key, effective_from, price, note, confirmed_by) VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (client_id, item_key, effective_from) DO UPDATE SET price = EXCLUDED.price, note = EXCLUDED.note,
+         confirmed_by = EXCLUDED.confirmed_by, confirmed_at = NOW()`,
+      [id, b.itemKey, b.effectiveFrom, price, b.note ? String(b.note).slice(0, 300) : null, session.username || 'user']
+    );
+    engine.forget(id);
+    return res.json(200, { ok: true });
+  }
+  if (req.method === 'DELETE') {
+    await query(`DELETE FROM audit_rework_prices WHERE client_id = $1 AND item_key = $2 AND effective_from = $3`,
+      [id, url.searchParams.get('itemKey'), url.searchParams.get('effectiveFrom')]);
+    engine.forget(id);
+    return res.json(200, { ok: true });
+  }
+  return res.json(405, { error: 'Method not allowed' });
+}
+
 async function handle(req, res, url, session) {
   const { pathname } = url;
+  const cm = pathname.match(/^\/api\/audit\/clients\/(\d+)$/);
+  if (cm && req.method === 'GET') return clientRates(req, res, url, parseInt(cm[1], 10));
+  const cp = pathname.match(/^\/api\/audit\/clients\/(\d+)\/prices$/);
+  if (cp) return clientPrices(req, res, url, parseInt(cp[1], 10), session);
   if (pathname === '/api/audit/overview' && req.method === 'GET') return overview(req, res, url);
   if (pathname === '/api/audit/coverage' && req.method === 'GET') return coverage(req, res, url);
   const m = pathname.match(/^\/api\/audit\/invoices\/(\d+)$/);

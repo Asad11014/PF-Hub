@@ -5,11 +5,13 @@ import { Link, useParams } from 'react-router-dom'
 import StatusBar from '../../components/StatusBar'
 import StatCard  from '../../components/StatCard'
 import { downloadCsv } from '../../lib/reportUtils'
-import { gbp, signedGbp, isZero, fmtDate, fmtDateTime, FLAG_META } from './format'
+import { gbp, signedGbp, isZero, fmtDate, fmtDateTime, FLAG_META, flagClass, fmtModel } from './format'
 
 const KIND_LABEL = { goods_in: 'Goods in', returns: 'Returns', other: 'Other', collections: 'Collections' }
 const money = v => (v == null || isZero(v) ? <span className="text-ink-dim">–</span> : gbp(v))
 const rework = items => items.map(i => `${i.item || 'Rework item'}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ')
+const expectedRework = e => e.items.map(i => `${i.name || i.code}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ')
+const warns = o => o.flags.filter(f => f.severity !== 'info')
 
 export default function AuditInvoice() {
   const { id } = useParams()
@@ -33,7 +35,7 @@ export default function AuditInvoice() {
     if (!data) return []
     const q = search.trim().toLowerCase()
     return data.orders.filter(o => {
-      if (filter === 'flagged' && !o.flags.length) return false
+      if (filter === 'flagged' && !warns(o).length) return false
       if (filter !== 'all' && filter !== 'flagged' && !o.flags.some(f => f.code === filter)) return false
       if (q && ![o.orderNumber, o.reference, o.courier, ...o.reworkItems.map(i => i.item)].some(v => (v || '').toLowerCase().includes(q))) return false
       return true
@@ -42,16 +44,19 @@ export default function AuditInvoice() {
 
   if (!data) return <div className="p-4 sm:p-7"><StatusBar message={status.msg} type={status.type} /></div>
   const { invoice: inv, categories, integrity, postage, flagCounts, extras } = data
-  const flagged = data.orders.filter(o => o.flags.length).length
+  const flagged = data.orders.filter(o => warns(o).length).length
+  const eng = data.engine
+  const pm = eng?.picking
   const itemisedDiff = integrity.difference
 
   function exportCsv() {
     downloadCsv(`invoice-${inv.id}-${(inv.clientName || '').replace(/\W+/g, '-')}-audit.csv`,
       ['Order', 'Reference', 'Despatched', 'Status', 'Courier', 'Items', 'Units', 'Picks', 'Picking', 'Extra picking', 'Postage charged', 'Courier cost', 'Postage margin',
-        'VAT-free postage', 'Packaging', 'Rework', 'Rework items', 'Admin', 'Total', 'Flags', 'Notes'],
+        'VAT-free postage', 'Packaging', 'Rework', 'Rework items', 'Admin', 'Total', 'Flags', 'Notes', 'Expected picking', 'Expected rework', 'Expected rework items'],
       data.orders.map(o => [o.orderNumber || o.orderId, o.reference, o.despatchDate ? fmtDate(o.despatchDate) : '', o.status, o.courier, o.items, o.units, o.picks,
         o.picking, o.extraPicking, o.postage, o.postageCourierCost, o.postageMargin, o.vatFreePostage, o.packaging, o.rework, rework(o.reworkItems), o.admin, o.total,
-        o.flags.map(f => FLAG_META[f.code]?.label || f.code).join('; '), o.notes.join(' · ')]))
+        o.flags.map(f => FLAG_META[f.code]?.label || f.code).join('; '), o.notes.join(' · '),
+        o.expected?.picking?.amount ?? '', o.expected?.rework?.amount ?? '', o.expected?.rework ? expectedRework(o.expected.rework) : '']))
   }
 
   return (
@@ -59,6 +64,7 @@ export default function AuditInvoice() {
       <header className="bg-brand-surface border-b border-brand-border px-4 sm:px-7 min-h-[52px] flex items-center justify-between sticky top-0 z-40 gap-2">
         <div className="flex items-center gap-3 min-w-0">
           <Link to="/app/audit" className="font-mono text-[11px] text-ink-muted hover:text-primary no-underline">← Invoices</Link>
+          {inv.clientId && <Link to={`/app/audit/client/${inv.clientId}`} className="font-mono text-[11px] text-ink-muted hover:text-primary no-underline">Rates &amp; rules</Link>}
           <div className="min-w-0">
             <div className="font-sans font-bold text-[15px] text-ink truncate">{inv.name || `Invoice #${inv.id}`} · {inv.clientName}</div>
             <div className="font-mono text-[11px] text-ink-muted hidden sm:block">#{inv.id} · dated {fmtDate(inv.date)} · last changed in Mintsoft {fmtDateTime(inv.updatedAt)}</div>
@@ -76,8 +82,25 @@ export default function AuditInvoice() {
           <StatCard label="Order lines" value={data.orders.length} />
           <StatCard label="Lines vs invoice" value={isZero(itemisedDiff) ? '✓ match' : signedGbp(itemisedDiff)} accent={isZero(itemisedDiff) ? 'success' : 'danger'} />
           <StatCard label="Postage margin" value={gbp(postage.margin)} accent={postage.margin < 0 ? 'danger' : undefined} />
-          <StatCard label="Flagged lines" value={flagged} accent={flagged ? 'warning' : 'success'} />
+          <StatCard label="Lines with warnings" value={flagged} accent={flagged ? 'warning' : 'success'} />
+          {eng && <StatCard label="Possibly undercharged" value={gbp(eng.totals.under)} accent={eng.totals.under ? 'danger' : 'success'} />}
+          {eng && <StatCard label="Possibly overcharged" value={gbp(eng.totals.over)} accent={eng.totals.over ? 'warning' : 'success'} />}
         </div>
+        {eng && (
+          <div className="bg-brand-surface border border-brand-border rounded-lg px-5 py-3 font-mono text-[11px] text-ink-muted space-y-1">
+            <div>
+              <span className="text-ink font-semibold">Picking:</span>{' '}
+              {pm ? <>this month’s pattern {fmtModel(pm.model)}{pm.cardMatched < pm.orders ? '' : ' (same as the rate card)'} reproduces {pm.matched}/{pm.orders} orders ({Math.round((pm.confidence || 0) * 100)}%).
+                {(pm.confidence || 0) < eng.minConfidence && <span className="text-warning"> Below {Math.round(eng.minConfidence * 100)}%: picking is not checked order by order for this month.</span>}</> : 'no pattern for this month.'}
+              {eng.excludedSkus.length > 0 && <> Never charged: {eng.excludedSkus.join(', ')}.</>}
+            </div>
+            <div>
+              <span className="text-ink font-semibold">Rework:</span>{' '}
+              {!eng.hasReworkRules ? 'this client has no rework rules in Mintsoft; only rework items charged £0.00 are checked.'
+                : eng.rework ? `today’s order rules reproduce ${eng.rework.reproduced}/${eng.rework.total} of this month’s orders.` : 'no orders this month that today’s rules can be checked against.'}
+            </div>
+          </div>
+        )}
         {postage.linesWithoutCost > 0 && (
           <div className="font-mono text-[11px] text-ink-muted -mt-2">
             Postage margin covers orders where Mintsoft recorded the courier cost. {postage.linesWithoutCost} order{postage.linesWithoutCost === 1 ? '' : 's'} charged {gbp(postage.totalCharged - postage.charged)} postage with no courier cost recorded.
@@ -107,7 +130,8 @@ export default function AuditInvoice() {
         </section>
 
         <div className="bg-brand-surface border border-brand-border rounded-lg px-4 py-3 flex flex-wrap items-center gap-2">
-          {[['all', `All (${data.orders.length})`], ['flagged', `Flagged (${flagged})`], ...Object.entries(flagCounts).map(([k, v]) => [k, `${FLAG_META[k]?.label || k} (${v})`])].map(([k, label]) => (
+          {[['all', `All (${data.orders.length})`], ['flagged', `Warnings (${flagged})`],
+            ...Object.entries(data.orders.reduce((m, o) => { o.flags.forEach(f => { m[f.code] = (m[f.code] || 0) + 1 }); return m }, {})).map(([k, v]) => [k, `${FLAG_META[k]?.label || k} (${v})`])].map(([k, label]) => (
             <button key={k} onClick={() => setFilter(k)}
               className={`font-mono text-[11px] rounded border px-2.5 py-1 ${filter === k ? 'bg-primary text-white border-primary' : 'bg-white text-ink-muted border-brand-border hover:text-ink'}`}>{label}</button>
           ))}
@@ -132,20 +156,24 @@ export default function AuditInvoice() {
                   <td className="px-3 py-2"><div className="font-bold">{o.orderNumber || `#${o.orderId}`}</div><div className="text-[10px] text-ink-muted">{o.status || '—'}{o.courier ? ` · ${o.courier}` : ''}</div></td>
                   <td className="px-3 py-2 whitespace-nowrap">{fmtDate(o.despatchDate)}</td>
                   <td className="px-3 py-2 text-right">{o.items ?? '—'}<div className="text-[10px] text-ink-muted">{o.units != null ? `${o.units} units` : ''}</div></td>
-                  <td className="px-3 py-2 text-right">{money(o.totalPicking)}{!isZero(o.extraPicking) && <div className="text-[10px] text-ink-muted">incl. extra {gbp(o.extraPicking)}</div>}</td>
+                  <td className="px-3 py-2 text-right">{money(o.totalPicking)}{!isZero(o.extraPicking) && <div className="text-[10px] text-ink-muted">incl. extra {gbp(o.extraPicking)}</div>}
+                    {o.expected?.picking && !o.expected.picking.matched && o.expected.picking.amount != null && <div className="text-[10px] text-warning">expected {gbp(o.expected.picking.amount)}</div>}</td>
                   <td className="px-3 py-2 text-right">{money(o.postage)}</td>
                   <td className="px-3 py-2 text-right text-ink-muted">{money(o.postageCourierCost)}</td>
                   <td className={`px-3 py-2 text-right ${o.postageMargin < 0 ? 'text-danger font-bold' : ''}`}>
                     {o.postageMargin != null ? gbp(o.postageMargin) : o.postage ? <span className="text-[10px] text-ink-muted" title="Mintsoft has no courier cost for this order">cost not recorded</span> : <span className="text-ink-dim">–</span>}
                   </td>
-                  <td className="px-3 py-2 text-right">{money(o.rework)}{o.reworkItems.length > 0 && <div className="text-[10px] text-ink-muted max-w-[180px] ml-auto">{rework(o.reworkItems)}</div>}</td>
+                  <td className="px-3 py-2 text-right">{money(o.rework)}{o.reworkItems.length > 0 && <div className="text-[10px] text-ink-muted max-w-[180px] ml-auto">{rework(o.reworkItems)}</div>}
+                    {o.expected?.rework && !o.expected.rework.reproduced && !o.expected.rework.uncertain && o.expected.rework.items.length > 0 &&
+                      <div className="text-[10px] text-warning max-w-[180px] ml-auto">rules: {expectedRework(o.expected.rework)}{o.expected.rework.amount != null ? ` = ${gbp(o.expected.rework.amount)}` : ' (price unknown)'}</div>}</td>
                   <td className="px-3 py-2 text-right">{money(o.packaging)}</td>
                   <td className="px-3 py-2 text-right">{money(o.admin)}</td>
                   <td className="px-3 py-2 text-right font-bold">{gbp(o.total)}</td>
                   <td className="px-3 py-2 max-w-[240px]">
                     {o.flags.map((f, i) => (
-                      <div key={i} title={f.text} className={`inline-block mr-1 mb-1 font-mono text-[10px] border rounded px-1.5 py-0.5 ${FLAG_META[f.code]?.cls || ''}`}>
+                      <div key={i} title={`${f.text}${f.explained ? ` (${f.explained})` : ''}`} className={`inline-block mr-1 mb-1 font-mono text-[10px] border rounded px-1.5 py-0.5 ${f.code === 'manual_note' ? FLAG_META.manual_note.cls : flagClass(f)}`}>
                         {f.code === 'manual_note' ? `“${f.text.slice(0, 40)}${f.text.length > 40 ? '…' : ''}”` : FLAG_META[f.code]?.label || f.code}
+                        {f.value != null && !isZero(f.value) && f.severity !== 'info' && <span className="ml-1">{signedGbp(f.value)}</span>}
                       </div>
                     ))}
                   </td>

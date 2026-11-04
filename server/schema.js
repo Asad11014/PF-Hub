@@ -440,6 +440,22 @@ async function ensureCoreSchema() {
     )
   `);
 
+  // Rework item prices confirmed (or corrected) by an Invoice Audit user. The
+  // engine infers prices from billing; a confirmed price wins from its date.
+  //   item_key: 'rule:<code>' (from an order rule) or 'name:<name>' (billed item)
+  await query(`
+    CREATE TABLE IF NOT EXISTS audit_rework_prices (
+      client_id      INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      item_key       TEXT NOT NULL,
+      effective_from DATE NOT NULL,
+      price          NUMERIC NOT NULL,
+      note           TEXT,
+      confirmed_by   TEXT NOT NULL,
+      confirmed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (client_id, item_key, effective_from)
+    )
+  `);
+
   // ── Staff permissions (server/permissions.js) ─────────────────────────────
   await query(`
     CREATE TABLE IF NOT EXISTS user_permissions (

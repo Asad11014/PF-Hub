@@ -59,6 +59,8 @@ export default function AuditOverview() {
   const mismatched = inv.filter(i => i.detailSynced && !isZero(i.difference)).length
   const margin = inv.reduce((s, i) => s + i.postage.margin, 0)
   const errorFlags = inv.reduce((s, i) => s + i.flags.doubleBilled + i.flags.cancelled + i.flags.notDespatched, 0)
+  const under = inv.reduce((s, i) => s + (i.expected?.under || 0), 0)
+  const over = inv.reduce((s, i) => s + (i.expected?.over || 0), 0)
 
   function exportCoverage() {
     const rows = [
@@ -107,6 +109,8 @@ export default function AuditOverview() {
               <StatCard label="Unbilled orders" value={cov.unbilled.length} accent={cov.unbilled.length ? 'danger' : 'success'} />
               <StatCard label="Billing errors" value={errorFlags} accent={errorFlags ? 'danger' : 'success'} />
               <StatCard label="Postage margin" value={gbp(margin)} accent={margin < 0 ? 'danger' : undefined} />
+              <StatCard label="Possibly undercharged" value={gbp(under)} accent={under ? 'danger' : 'success'} />
+              <StatCard label="Possibly overcharged" value={gbp(over)} accent={over ? 'warning' : 'success'} />
             </div>
 
             <div className="space-y-3">
@@ -177,11 +181,11 @@ export default function AuditOverview() {
                   <tr className="border-b border-brand-border font-mono text-[9px] text-ink-dim uppercase tracking-widest">
                     <th className="px-4 py-3">Invoice</th><th className="px-4 py-3">Client</th><th className="px-4 py-3 text-right">Orders</th>
                     <th className="px-4 py-3 text-right">Billed</th><th className="px-4 py-3 text-right">Lines vs invoice</th>
-                    <th className="px-4 py-3 text-right">Postage margin</th><th className="px-4 py-3">Flags</th>
+                    <th className="px-4 py-3 text-right">Postage margin</th><th className="px-4 py-3">Expected vs billed</th><th className="px-4 py-3">Flags</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {inv.length === 0 && <tr><td colSpan={7} className="px-4 py-8 text-center font-mono text-xs text-ink-muted">No confirmed invoices in this period.</td></tr>}
+                  {inv.length === 0 && <tr><td colSpan={8} className="px-4 py-8 text-center font-mono text-xs text-ink-muted">No confirmed invoices in this period.</td></tr>}
                   {inv.map(i => {
                     const f = i.flags
                     const chips = [
@@ -193,7 +197,9 @@ export default function AuditOverview() {
                     return (
                       <tr key={i.id} onClick={() => navigate(`/app/audit/invoice/${i.id}`)} className="border-b border-brand-border/60 last:border-0 cursor-pointer hover:bg-brand-bg">
                         <td className="px-4 py-2.5"><div className="font-sans text-sm text-ink">{i.name || `#${i.id}`}</div><div className="font-mono text-[10px] text-ink-muted">{fmtDate(i.date)} · #{i.id}</div></td>
-                        <td className="px-4 py-2.5 text-sm text-ink">{i.clientName}</td>
+                        <td className="px-4 py-2.5 text-sm text-ink">
+                          <Link to={`/app/audit/client/${i.clientId}`} onClick={e => e.stopPropagation()} className="text-ink hover:text-primary no-underline">{i.clientName}</Link>
+                        </td>
                         <td className="px-4 py-2.5 text-right font-mono text-xs text-ink">{i.orderLines}</td>
                         <td className="px-4 py-2.5 text-right font-mono text-sm font-semibold text-ink">{gbp(i.total)}</td>
                         <td className={`px-4 py-2.5 text-right font-mono text-xs ${!i.detailSynced ? 'text-ink-muted' : isZero(i.difference) ? 'text-success' : 'text-danger font-bold'}`}>
@@ -203,6 +209,11 @@ export default function AuditOverview() {
                         <td className={`px-4 py-2.5 text-right font-mono text-xs ${i.postage.margin < 0 ? 'text-danger' : 'text-ink'}`}>
                           {gbp(i.postage.margin)}
                           {i.postage.linesWithoutCost > 0 && <div className="text-[9px] text-ink-muted">{i.postage.linesWithoutCost} without courier cost</div>}
+                        </td>
+                        <td className="px-4 py-2.5 font-mono text-[10px] whitespace-nowrap">
+                          {!i.expected || i.beforeHistory ? <span className="text-ink-muted">—</span>
+                            : i.expected.warnings ? <span className="text-warning">{i.expected.warnings} warning{i.expected.warnings === 1 ? '' : 's'}{i.expected.under ? ` · −${gbp(i.expected.under)}` : ''}{i.expected.over ? ` · +${gbp(i.expected.over)}` : ''}</span>
+                            : <span className="text-success">✓{i.expected.info ? ` (${i.expected.info} explained)` : ''}</span>}
                         </td>
                         <td className="px-4 py-2.5 font-mono text-[10px]">{chips.length ? chips.map(([t, c]) => <span key={t} className={`mr-2 ${c}`}>{t}</span>) : <span className="text-success">✓</span>}</td>
                       </tr>

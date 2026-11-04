@@ -268,6 +268,7 @@ function attachLogging(page, persona) {
     await api(own, 'OWNER audit access panel', '/api/audit/access', {}, { status: [200] });
     await api(wh, 'WH audit overview without grant', '/api/audit/overview', {}, { status: [403] });
     await api(wh, 'WH audit invoice without grant', '/api/audit/invoices/337', {}, { status: [403] });
+    await api(wh, 'WH audit client rates without grant', '/api/audit/clients/10', {}, { status: [403] });
     expectIn('WH menu hides Invoice Audit without grant', await textOf(wh, 'wh-27-no-audit', '/app'), 'Invoice Audit', false);
 
     await api(own, 'OWNER grant __wh__', '/api/audit/access', { method: 'POST', data: { username: '__WH__ ' } }, { status: [200] });
@@ -281,8 +282,22 @@ function attachLogging(page, persona) {
     await api(own, 'OWNER revoke __client__', '/api/audit/access?username=__client__', { method: 'DELETE' }, { status: [200] });
 
     const invId = (ov.body?.invoices || []).find(i => i.orderLines > 0)?.id || 337;
+    // Expected-vs-billed (I2): rates page, price confirmation round trip.
+    const rates = await api(own, 'OWNER client rates (Serendipity)', '/api/audit/clients/10', {}, { status: [200] });
+    results.expectations.push({ label: `engine reproduces Serendipity picking ≥ 90% (${rates.body?.accuracy?.picking?.matched}/${rates.body?.accuracy?.picking?.total})`, expected: ['≥ 90%'],
+      got: rates.body?.accuracy?.picking ? `${Math.round(100 * rates.body.accuracy.picking.matched / Math.max(1, rates.body.accuracy.picking.total))}%` : 'none',
+      ok: !!rates.body?.accuracy?.picking && rates.body.accuracy.picking.matched / Math.max(1, rates.body.accuracy.picking.total) >= 0.9 });
+    await api(own, 'OWNER confirm rework price', '/api/audit/clients/10/prices', { method: 'PUT', data: { itemKey: 'rule:SW-BOX', price: 0.14, effectiveFrom: '2099-01-01', note: 'qa' } }, { status: [200] });
+    const after = await api(own, 'OWNER client rates after confirm', '/api/audit/clients/10', {}, { status: [200] });
+    const sw = (after.body?.reworkItems || []).find(i => i.key === 'rule:SW-BOX');
+    results.expectations.push({ label: 'confirmed price is listed', expected: ['yes'], got: sw?.confirmed?.some(c => c.effective_from === '2099-01-01') ? 'yes' : 'no', ok: !!sw?.confirmed?.some(c => c.effective_from === '2099-01-01') });
+    await api(own, 'OWNER bad price rejected', '/api/audit/clients/10/prices', { method: 'PUT', data: { itemKey: 'rule:SW-BOX', price: -1, effectiveFrom: '2099-01-01' } }, { status: [400] });
+    await api(own, 'OWNER remove confirmed price', '/api/audit/clients/10/prices?itemKey=rule:SW-BOX&effectiveFrom=2099-01-01', { method: 'DELETE' }, { status: [200] });
+    expectIn('OWNER rates & rules page', await textOf(own, 'wh-29-audit-client', '/app/audit/client/10'), 'Rework items and prices');
     expectIn('OWNER audit overview page', await textOf(own, 'wh-24-audit-overview', '/app/audit'), 'Despatched but never billed');
-    expectIn(`OWNER invoice audit page (#${invId})`, await textOf(own, 'wh-25-audit-invoice', `/app/audit/invoice/${invId}`), 'Invoice totals vs its lines');
+    const invText = await textOf(own, 'wh-25-audit-invoice', `/app/audit/invoice/${invId}`);
+    expectIn(`OWNER invoice audit page (#${invId})`, invText, 'Invoice totals vs its lines');
+    expectIn('OWNER invoice page shows expected vs billed', invText, 'Possibly undercharged');
     expectIn('OWNER access page', await textOf(own, 'wh-26-audit-access', '/app/audit/access'), 'Who can see Invoice Audit');
 
     await api(own, 'OWNER revoke __wh__', '/api/audit/access?username=__wh__', { method: 'DELETE' }, { status: [200] });
