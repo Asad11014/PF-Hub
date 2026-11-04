@@ -9,6 +9,9 @@ const REWORK_LINE_SQL = '-\\s*X\\s*\\d+\\s*$';
 const HAS_MANUAL_LINE_SQL = col => `EXISTS (SELECT 1 FROM regexp_split_to_table(COALESCE(${col}, ''), E'\\r?\\n') AS ln
                                            WHERE btrim(ln) <> '' AND ln !~* '${REWORK_LINE_SQL}')`;
 const ZEROED = /zero|zerod|no charge|free of charge|waive/i;
+// SQL twin of "a typed note mentions zeroing" (ZEROED on a non-rework line).
+const ZEROED_LINE_SQL = col => `EXISTS (SELECT 1 FROM regexp_split_to_table(COALESCE(${col}, ''), E'\\r?\\n') AS ln
+                                        WHERE btrim(ln) <> '' AND ln !~* '${REWORK_LINE_SQL}' AND ln ~* '${ZEROED.source}')`;
 
 function parseComments(text) {
   const reworkItems = [], notes = [];
@@ -22,4 +25,4 @@ function parseComments(text) {
   return { reworkItems, notes };
 }
 
-module.exports = { parseComments, REWORK_LINE, REWORK_LINE_SQL, HAS_MANUAL_LINE_SQL, ZEROED };
+module.exports = { parseComments, REWORK_LINE, REWORK_LINE_SQL, HAS_MANUAL_LINE_SQL, ZEROED_LINE_SQL, ZEROED };

@@ -7,7 +7,8 @@ import { useSession } from '../../context/SessionContext'
 import StatusBar from '../../components/StatusBar'
 import StatCard  from '../../components/StatCard'
 import { downloadCsv } from '../../lib/reportUtils'
-import { gbp, signedGbp, isZero, fmtDate } from './format'
+import { gbp, signedGbp, isZero, fmtDate, REVIEW_META, INVOICE_STATUS } from './format'
+import { Chip, ReviewControl } from './Review'
 
 const ym = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 const monthsAgo = k => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - k); return ym(d) }
@@ -32,8 +33,10 @@ const Th = ({ children, right }) => <th className={`py-1.5 pr-3 font-medium ${ri
 const headRow = 'font-mono text-[10px] uppercase tracking-wider text-ink-muted border-b border-brand-border'
 
 export default function AuditOverview() {
-  const { session } = useSession()
+  const { session, hasPermission } = useSession()
+  const canReview = hasPermission('invoice_audit_review')
   const navigate = useNavigate()
+  const [openOrder, setOpenOrder] = useState(null)
   const [from, setFrom] = useState(monthsAgo(3))
   const [to, setTo] = useState(monthsAgo(0))
   const [clientId, setClientId] = useState('')
@@ -61,6 +64,10 @@ export default function AuditOverview() {
   const errorFlags = inv.reduce((s, i) => s + i.flags.doubleBilled + i.flags.cancelled + i.flags.notDespatched, 0)
   const under = inv.reduce((s, i) => s + (i.expected?.under || 0), 0)
   const over = inv.reduce((s, i) => s + (i.expected?.over || 0), 0)
+  const openFindings = inv.reduce((s, i) => s + (i.review?.open || 0), 0)
+  const signedOff = inv.filter(i => i.review?.status === 'signed_off').length
+  const unbilledOpen = cov ? cov.unbilled.filter(o => !o.review).length : 0
+  const findingsUrl = `/api/audit/findings.csv?${new URLSearchParams({ from, to, ...(clientId ? { clientId } : {}) })}`
 
   function exportCoverage() {
     const rows = [
@@ -79,7 +86,9 @@ export default function AuditOverview() {
           <div className="font-sans font-bold text-[15px] text-ink">Invoice Audit</div>
           <div className="font-mono text-[11px] text-ink-muted hidden sm:block">What we billed, order by order, and what doesn’t add up · confirmed invoices</div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Link to="/app/audit/preview" className="border border-brand-border rounded text-ink-muted font-mono text-[11px] px-3 py-1.5 hover:border-primary hover:text-primary no-underline">This month so far</Link>
+          {data && <a href={findingsUrl} download className="border border-brand-border rounded text-ink-muted font-mono text-[11px] px-3 py-1.5 hover:border-gold hover:text-gold no-underline">Export findings CSV</a>}
           {cov && <button onClick={exportCoverage} className="border border-brand-border rounded text-ink-muted font-mono text-[11px] px-3 py-1.5 hover:border-gold hover:text-gold">Export checks CSV</button>}
           {session?.isOwner && <Link to="/app/audit/access" className="border border-brand-border rounded text-ink-muted font-mono text-[11px] px-3 py-1.5 hover:border-primary hover:text-primary no-underline">Access</Link>}
         </div>
@@ -102,7 +111,7 @@ export default function AuditOverview() {
 
         {data && cov && (
           <>
-            <div className="flex flex-wrap gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3">
               <StatCard label="Invoices" value={inv.length} />
               <StatCard label="Billed" value={gbp(billed)} />
               <StatCard label="Lines ≠ invoice" value={mismatched} accent={mismatched ? 'danger' : 'success'} />
@@ -111,19 +120,31 @@ export default function AuditOverview() {
               <StatCard label="Postage margin" value={gbp(margin)} accent={margin < 0 ? 'danger' : undefined} />
               <StatCard label="Possibly undercharged" value={gbp(under)} accent={under ? 'danger' : 'success'} />
               <StatCard label="Possibly overcharged" value={gbp(over)} accent={over ? 'warning' : 'success'} />
+              <StatCard label="Findings to review" value={openFindings} accent={openFindings ? 'warning' : 'success'} />
+              <StatCard label="Signed off" value={`${signedOff} / ${inv.length}`} accent={inv.length && signedOff === inv.length ? 'success' : undefined} />
             </div>
 
             <div className="space-y-3">
-              <Section title="Despatched but never billed" count={cov.unbilled.length} tone="danger"
-                hint={`despatched more than ${cov.cutoffHours} h before the client’s latest billing run and on no invoice`}>
-                <table className="w-full text-left min-w-[640px]">
-                  <thead><tr className={headRow}><Th>Client</Th><Th>Order</Th><Th>Ordered</Th><Th>Despatched</Th><Th>Status</Th><Th>Courier</Th></tr></thead>
+              <Section title="Despatched but never billed" count={unbilledOpen} tone="danger"
+                hint={`despatched more than ${cov.cutoffHours} h before the client’s latest billing run and on no invoice${cov.unbilled.length > unbilledOpen ? ` · ${cov.unbilled.length - unbilledOpen} reviewed` : ''}`}>
+                <table className="w-full text-left min-w-[720px]">
+                  <thead><tr className={headRow}><Th>Client</Th><Th>Order</Th><Th>Ordered</Th><Th>Despatched</Th><Th>Status</Th><Th>Courier</Th><Th>Review</Th></tr></thead>
                   <tbody>{cov.unbilled.map(o => (
-                    <tr key={o.orderId} className="border-b border-brand-border/60 font-mono text-[11px] text-ink">
-                      <td className="py-1.5 pr-3 font-sans text-xs">{o.clientName}</td><td className="py-1.5 pr-3 font-bold">{o.orderNumber}</td>
+                    <Fragment key={o.orderId}>
+                    <tr onClick={() => setOpenOrder(x => (x === o.orderId ? null : o.orderId))} className="border-b border-brand-border/60 font-mono text-[11px] text-ink cursor-pointer hover:bg-brand-bg">
+                      <td className="py-1.5 pr-3 font-sans text-xs">{o.clientName}</td>
+                      <td className="py-1.5 pr-3 font-bold"><Link to={`/app/audit/order/${o.orderId}`} onClick={e => e.stopPropagation()}>{o.orderNumber}</Link></td>
                       <td className="py-1.5 pr-3">{fmtDate(o.orderDate)}</td><td className="py-1.5 pr-3">{fmtDate(o.despatchDate)}</td>
                       <td className="py-1.5 pr-3">{o.status}</td><td className="py-1.5 pr-3 text-ink-muted">{o.courier}</td>
-                    </tr>))}</tbody>
+                      <td className="py-1.5 pr-3">{o.review ? <Chip cls={REVIEW_META[o.review.status]?.cls}>{REVIEW_META[o.review.status]?.label}</Chip> : <span className="text-ink-muted">open ▸</span>}</td>
+                    </tr>
+                    {openOrder === o.orderId && (
+                      <tr className="border-b border-brand-border/60 bg-brand-bg/60"><td colSpan={7} className="py-1 px-2">
+                        <ReviewControl f={{ code: 'unbilled', severity: 'error', subject: o.subject, check: o.check, review: o.review, text: `Despatched ${fmtDate(o.despatchDate)} and not on any invoice` }}
+                          canReview={canReview} locked={false} onSaved={load} />
+                      </td></tr>
+                    )}
+                    </Fragment>))}</tbody>
                 </table>
               </Section>
 
@@ -176,16 +197,17 @@ export default function AuditOverview() {
             </div>
 
             <div className="bg-brand-surface border border-brand-border rounded-lg overflow-x-auto">
-              <table className="w-full text-left min-w-[900px]">
+              <table className="w-full text-left min-w-[1020px]">
                 <thead>
                   <tr className="border-b border-brand-border font-mono text-[9px] text-ink-dim uppercase tracking-widest">
                     <th className="px-4 py-3">Invoice</th><th className="px-4 py-3">Client</th><th className="px-4 py-3 text-right">Orders</th>
                     <th className="px-4 py-3 text-right">Billed</th><th className="px-4 py-3 text-right">Lines vs invoice</th>
                     <th className="px-4 py-3 text-right">Postage margin</th><th className="px-4 py-3">Expected vs billed</th><th className="px-4 py-3">Flags</th>
+                    <th className="px-4 py-3">Review</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {inv.length === 0 && <tr><td colSpan={8} className="px-4 py-8 text-center font-mono text-xs text-ink-muted">No confirmed invoices in this period.</td></tr>}
+                  {inv.length === 0 && <tr><td colSpan={9} className="px-4 py-8 text-center font-mono text-xs text-ink-muted">No confirmed invoices in this period.</td></tr>}
                   {inv.map(i => {
                     const f = i.flags
                     const chips = [
@@ -212,10 +234,15 @@ export default function AuditOverview() {
                         </td>
                         <td className="px-4 py-2.5 font-mono text-[10px] whitespace-nowrap">
                           {!i.expected || i.beforeHistory ? <span className="text-ink-muted">—</span>
-                            : i.expected.warnings ? <span className="text-warning">{i.expected.warnings} warning{i.expected.warnings === 1 ? '' : 's'}{i.expected.under ? ` · −${gbp(i.expected.under)}` : ''}{i.expected.over ? ` · +${gbp(i.expected.over)}` : ''}</span>
+                            : i.expected.open ? <span className="text-warning">{i.expected.open} warning{i.expected.open === 1 ? '' : 's'}{i.expected.under ? ` · −${gbp(i.expected.under)}` : ''}{i.expected.over ? ` · +${gbp(i.expected.over)}` : ''}</span>
+                            : i.expected.warnings ? <span className="text-success">✓ {i.expected.warnings} reviewed</span>
                             : <span className="text-success">✓{i.expected.info ? ` (${i.expected.info} explained)` : ''}</span>}
                         </td>
                         <td className="px-4 py-2.5 font-mono text-[10px]">{chips.length ? chips.map(([t, c]) => <span key={t} className={`mr-2 ${c}`}>{t}</span>) : <span className="text-success">✓</span>}</td>
+                        <td className="px-4 py-2.5 whitespace-nowrap">
+                          <Chip cls={(INVOICE_STATUS[i.review?.status] || INVOICE_STATUS.not_reviewed).cls}>{(INVOICE_STATUS[i.review?.status] || INVOICE_STATUS.not_reviewed).label}</Chip>
+                          <div className={`font-mono text-[10px] mt-0.5 ${i.review?.open ? 'text-warning' : 'text-ink-muted'}`}>{i.review?.open ? `${i.review.open} open` : 'nothing open'}{i.review?.reviewed ? ` · ${i.review.reviewed} reviewed` : ''}</div>
+                        </td>
                       </tr>
                     )
                   })}

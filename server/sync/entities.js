@@ -144,7 +144,8 @@ const mapInvoice = i => [
   ...costs(i), ts(i.LastUpdated),
 ];
 
-const ACCRUAL_COLS = ['client_id', 'period_month', ...COST_COLS, 'number_of_parcels', 'number_of_items'];
+// source_updated_at = Mintsoft's LastUpdated: the time of its last daily billing run (~19:05).
+const ACCRUAL_COLS = ['client_id', 'period_month', ...COST_COLS, 'number_of_parcels', 'number_of_items', 'source_updated_at'];
 
 // ── Foreign-key helpers ───────────────────────────────────────────────────────
 
@@ -600,7 +601,7 @@ async function syncAccruals(ctx) {
   for (const { id } of clients) {
     try {
       const s = await ctx.get(`/api/Account/Invoice/GetUnconfirmedInvoiceSummary?clientID=${id}&fromDate=${from}&toDate=${to}`);
-      if (s && typeof s === 'object') rows.push([id, from, ...costs(s), int(s.NumberOfParcels) ?? 0, int(s.NumberOfItems) ?? 0]);
+      if (s && typeof s === 'object') rows.push([id, from, ...costs(s), int(s.NumberOfParcels) ?? 0, int(s.NumberOfItems) ?? 0, ts(s.LastUpdated)]);
     } catch (err) { failed.push(`${id} (${err.status || err.code || 'error'})`); }
   }
   const upserted = await bulkUpsert(direct, 'invoice_accruals', ACCRUAL_COLS, rows, { conflict: ['client_id', 'period_month'], nowCol: 'updated_at' });

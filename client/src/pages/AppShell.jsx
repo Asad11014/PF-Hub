@@ -45,6 +45,8 @@ import AuditOverview   from './audit/AuditOverview'
 import AuditInvoice    from './audit/AuditInvoice'
 import AuditAccess     from './audit/AuditAccess'
 import AuditClient     from './audit/AuditClient'
+import AuditOrder      from './audit/AuditOrder'
+import AuditPreview    from './audit/AuditPreview'
 import { RequireModule, SubscriptionRequired } from '../components/ModuleGate'
 
 // Staff tools: only users holding the permission (checked again on the server).
@@ -161,6 +163,8 @@ function AppShellLayout() {
           <Route path="audit/invoice/:id" element={<RequirePermission permission="invoice_audit"><AuditInvoice /></RequirePermission>} />
           <Route path="audit/access"      element={<RequirePermission permission="invoice_audit"><AuditAccess /></RequirePermission>} />
           <Route path="audit/client/:id"  element={<RequirePermission permission="invoice_audit"><AuditClient /></RequirePermission>} />
+          <Route path="audit/order/:id"   element={<RequirePermission permission="invoice_audit"><AuditOrder /></RequirePermission>} />
+          <Route path="audit/preview"     element={<RequirePermission permission="invoice_audit"><AuditPreview /></RequirePermission>} />
           <Route path="todo"              element={<WarehouseOnly><Placeholder title="To Do Lists" blurb="Team to-do lists — a future home for warehouse tasks (eventually replacing Trello)." icon="✅" /></WarehouseOnly>} />
 
           {/* Financial */}

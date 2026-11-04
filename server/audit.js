@@ -4,17 +4,24 @@
 //   A1 unbilled orders · A2 double-billed · A3 cancelled or undespatched billed ·
 //   A4 zero-charge lines and manual notes · D13 postage below courier cost ·
 //   E15 invoice header vs the sum of its lines.
-// Routes: /api/audit/* (warehouse + 'invoice_audit' permission, enforced in index.js).
+// Stage I3 adds the review workflow (server/audit-review.js): findings marked
+// OK / to credit / to charge, invoice sign-off, the audit trail, the order
+// drill-down, the month-to-date preview, the findings export and audit rules.
+// Routes: /api/audit/* (warehouse + 'invoice_audit' permission, enforced in index.js;
+// changes also need 'invoice_audit_review', checked in handle() below).
 // Data: invoice_orders / invoice_extra_lines (server/sync/entities.js).
 
 const { query, queryOne } = require('./db');
 const permissions = require('./permissions');
 const engine = require('./audit-engine');
+const review = require('./audit-review');
+const { SUPPORTED_FIELDS, OPERATORS } = require('./audit-rules');
+const { RULE_CATEGORIES, EXPECTATIONS, describeExpectation } = require('./audit-checks');
 
 const r2 = v => Math.round((Number(v) || 0) * 100) / 100;
 const n = v => (v == null ? null : Number(v));
 
-const { parseComments, HAS_MANUAL_LINE_SQL, ZEROED } = require('./audit-comments');
+const { parseComments, HAS_MANUAL_LINE_SQL, ZEROED_LINE_SQL, ZEROED } = require('./audit-comments');
 // Mintsoft bills an order hours after despatch; orders despatched within this
 // window before a client's latest billing run may land on the next invoice.
 const CUTOFF_HOURS = 12;
@@ -126,8 +133,17 @@ async function overview(req, res, url) {
                 COUNT(*) FILTER (WHERE o.id IS NOT NULL AND o.despatch_date IS NULL AND o.status_name <> 'Cancelled')::int AS not_despatched,
                 COUNT(*) FILTER (WHERE o.id IS NULL)::int AS order_missing,
                 COUNT(*) FILTER (WHERE ${HAS_MANUAL_LINE_SQL('io.comments')})::int AS notes,
-                COUNT(*) FILTER (WHERE io.order_id IN (SELECT order_id FROM dup))::int AS double_billed
+                COUNT(*) FILTER (WHERE io.order_id IN (SELECT order_id FROM dup))::int AS double_billed,
+                -- The same checks, not yet reviewed (stage I3).
+                (COUNT(*) FILTER (WHERE io.order_id IN (SELECT order_id FROM dup) AND NOT 'double_billed' = ANY(rv.codes))
+                 + COUNT(*) FILTER (WHERE o.status_name = 'Cancelled' AND NOT 'cancelled' = ANY(rv.codes))
+                 + COUNT(*) FILTER (WHERE o.id IS NOT NULL AND o.despatch_date IS NULL AND o.status_name <> 'Cancelled' AND NOT 'not_despatched' = ANY(rv.codes))
+                 + COUNT(*) FILTER (WHERE COALESCE(io.total_cost, 0) = 0 AND NOT 'zero_charge' = ANY(rv.codes))
+                 + COUNT(*) FILTER (WHERE io.cost_postage_cost > 0 AND io.postage_cost < io.cost_postage_cost AND NOT 'postage_below_cost' = ANY(rv.codes))
+                 + COUNT(*) FILTER (WHERE ${ZEROED_LINE_SQL('io.comments')} AND NOT 'manual_zeroing' = ANY(rv.codes)))::int AS open_line_checks,
+                COUNT(*) FILTER (WHERE o.id IS NULL AND NOT 'order_missing' = ANY(rv.codes))::int AS open_order_missing
          FROM invoice_orders io LEFT JOIN orders o ON o.id = io.order_id
+         LEFT JOIN LATERAL (SELECT COALESCE(array_agg(r.check_code), '{}') AS codes FROM audit_reviews r WHERE r.subject = 'line:' || io.id) rv ON TRUE
          WHERE io.invoice_id IN (SELECT id FROM inv)
          GROUP BY io.invoice_id
        ),
@@ -138,6 +154,7 @@ async function overview(req, res, url) {
               GROUP BY invoice_id)
        SELECT inv.*, lo.lines, lo.order_total, lo.order_sums, lo.postage_charged, lo.postage_cost AS postage_courier_cost, lo.cost_unknown, lo.zero_lines,
               lo.below_cost, lo.cancelled, lo.not_despatched, lo.order_missing, lo.notes, lo.double_billed,
+              lo.open_line_checks, lo.open_order_missing,
               ex.extra_sums, ex.extra_counts, ex.extra_lines
        FROM inv LEFT JOIN lo ON lo.invoice_id = inv.id LEFT JOIN ex ON ex.invoice_id = inv.id
        ORDER BY inv.invoice_date DESC, inv.client_name`,
@@ -168,7 +185,22 @@ async function overview(req, res, url) {
   // Expected-vs-billed checks (stage I2), per client, cached by the engine.
   for (const cid of [...new Set(invoices.map(i => i.clientId).filter(Boolean))]) {
     const ca = await engine.clientAudit(cid);
-    for (const i of invoices.filter(x => x.clientId === cid)) i.expected = ca.byInvoice[i.id] || { warnings: 0, info: 0, under: 0, over: 0, codes: {} };
+    for (const i of invoices.filter(x => x.clientId === cid)) i.expected = ca.byInvoice[i.id] || { warnings: 0, info: 0, under: 0, over: 0, codes: {}, findings: [] };
+  }
+  // Review status and findings still open (stage I3).
+  const summaries = await review.invoiceSummaries(invoices.map(i => i.id));
+  const byId = new Map(rows.map(r => [r.id, r]));
+  for (const i of invoices) {
+    const s = summaries.get(i.id);
+    const row = byId.get(i.id);
+    // "Possibly under/overcharged" counts findings nobody has reviewed yet.
+    const { findings = [], ...expected } = i.expected || {};
+    const openEngine = findings.filter(x => !s.reviewed.has(x.k));
+    i.expected = { ...expected, open: openEngine.length, ...sumValues(openEngine.map(x => x.v)) };
+    const open = openEngine.length
+      + (row.open_line_checks || 0) + (i.beforeHistory ? 0 : (row.open_order_missing || 0))
+      + (i.difference != null && Math.abs(i.difference) >= 0.01 && !s.reviewed.has(`invoice:${i.id}|lines_differ`) ? 1 : 0);
+    i.review = { status: s.status, by: s.by || null, at: s.at || null, reviewed: s.reviewed.size, open };
   }
   const unbilled = await unbilledOrders(range, clientId);
   return res.json(200, {
@@ -178,6 +210,13 @@ async function overview(req, res, url) {
       return m;
     }, {})),
   });
+}
+
+// £ the open findings add up to: negative values = charged less than expected.
+function sumValues(values) {
+  let under = 0, over = 0;
+  for (const v of values) { if (v < 0) under -= v; else if (v > 0) over += v; }
+  return { under: r2(under), over: r2(over) };
 }
 
 // ── Coverage (A1–A4) ──────────────────────────────────────────────────────────
@@ -255,9 +294,11 @@ async function coverage(req, res, url) {
       [CUTOFF_HOURS]
     ),
   ]);
+  // Unbilled orders can be reviewed too (e.g. "not chargeable, sample order").
+  const unbilledReviews = await review.reviewsFor({ subjects: unbilled.map(o => `order:${o.orderId}`) });
   return res.json(200, {
     range, cutoffHours: CUTOFF_HOURS,
-    unbilled,
+    unbilled: unbilled.map(o => ({ ...o, subject: `order:${o.orderId}`, check: 'unbilled', review: unbilledReviews.get(`order:${o.orderId}|unbilled`) || null })),
     doubleBilled: doubleBilled.map(d => ({ orderId: d.order_id, orderNumber: d.order_number, clientId: d.client_id, clientName: d.client_name, lines: d.lines })),
     billedWrongState: wrongState.map(w => ({
       orderId: w.order_id, orderNumber: w.order_number, clientId: w.client_id, clientName: w.client_name, invoiceId: w.invoice_id,
@@ -283,23 +324,50 @@ async function coverage(req, res, url) {
 
 // ── One invoice: header vs lines, every order line with its flags ────────────
 
-async function invoiceDetail(req, res, url, id) {
+// Coverage and integrity flags of one billed order line (stage I1).
+//   l: invoice_orders row + order_known, status_name, despatch_date, others
+function lineFlags(l, beforeHistory) {
+  const flags = [];
+  const { notes } = parseComments(l.comments);
+  const note = notes.join(' · ') || null;
+  if (l.others) flags.push({ code: 'double_billed', severity: 'error', text: `Also billed on invoice ${l.others.map(o => o.invoiceId).join(', ')}` });
+  if (l.order_known && l.status_name === 'Cancelled') flags.push({ code: 'cancelled', severity: 'error', text: 'Order is cancelled' });
+  if (l.order_known && !l.despatch_date && l.status_name !== 'Cancelled') flags.push({ code: 'not_despatched', severity: 'error', text: 'Order has not been despatched' });
+  if (!l.order_known && !beforeHistory) flags.push({ code: 'order_missing', severity: 'warning', text: 'Order no longer exists in Mintsoft' });
+  if (Number(l.cost_postage_cost) > 0 && Number(l.postage_cost) < Number(l.cost_postage_cost)) flags.push({ code: 'postage_below_cost', severity: 'warning', text: `Postage charged £${r2(l.postage_cost).toFixed(2)} is below courier cost £${r2(l.cost_postage_cost).toFixed(2)}` });
+  if (!Number(l.total_cost)) flags.push({ code: 'zero_charge', severity: 'warning', text: 'Nothing charged for this order' });
+  if (note) flags.push({ code: ZEROED.test(note) ? 'manual_zeroing' : 'manual_note', severity: ZEROED.test(note) ? 'warning' : 'info', text: note });
+  return flags;
+}
+
+// Attach each flag's finding key and review; → number of open findings.
+const NEEDS_REVIEW = new Set(['error', 'warning']);
+function attachReviews(subject, flags, reviews) {
+  let open = 0;
+  for (const f of flags) {
+    f.subject = subject;
+    f.check = f.check || f.code;
+    f.review = reviews.get(`${subject}|${f.check}`) || null;
+    if (NEEDS_REVIEW.has(f.severity) && !f.review) open++;
+  }
+  return open;
+}
+
+const LINE_SQL = `
+  SELECT io.*, o.order_number, o.external_reference, o.order_date, o.despatch_date, o.status_name, o.courier_service_name,
+         o.number_of_parcels, o.total_weight, o.channel_name, (o.id IS NOT NULL) AS order_known,
+         it.items, it.units, dup.others
+  FROM invoice_orders io
+  LEFT JOIN orders o ON o.id = io.order_id
+  LEFT JOIN LATERAL (SELECT COUNT(*)::int AS items, SUM(quantity)::int AS units FROM order_items WHERE order_id = io.order_id) it ON TRUE
+  LEFT JOIN LATERAL (SELECT json_agg(json_build_object('invoiceId', x.invoice_id, 'lineId', x.id)) AS others
+                     FROM invoice_orders x WHERE x.order_id = io.order_id AND x.id <> io.id) dup ON TRUE`;
+
+async function invoiceData(id) {
   const inv = await queryOne(`SELECT i.*, c.name AS client_name FROM invoices i LEFT JOIN clients c ON c.id = i.client_id WHERE i.id = $1`, [id]);
-  if (!inv) return res.json(404, { error: 'Invoice not found' });
-  const [lines, extras, hist] = await Promise.all([
-    query(
-      `SELECT io.*, o.order_number, o.external_reference, o.order_date, o.despatch_date, o.status_name, o.courier_service_name,
-              o.number_of_parcels, o.total_weight, o.channel_name, (o.id IS NOT NULL) AS order_known,
-              it.items, it.units, dup.others
-       FROM invoice_orders io
-       LEFT JOIN orders o ON o.id = io.order_id
-       LEFT JOIN LATERAL (SELECT COUNT(*)::int AS items, SUM(quantity)::int AS units FROM order_items WHERE order_id = io.order_id) it ON TRUE
-       LEFT JOIN LATERAL (SELECT json_agg(json_build_object('invoiceId', x.invoice_id, 'lineId', x.id)) AS others
-                          FROM invoice_orders x WHERE x.order_id = io.order_id AND x.id <> io.id) dup ON TRUE
-       WHERE io.invoice_id = $1
-       ORDER BY o.despatch_date NULLS LAST, io.order_id`,
-      [id]
-    ),
+  if (!inv) return null;
+  const [lines, extras, hist, reviews, status, trail] = await Promise.all([
+    query(`${LINE_SQL} WHERE io.invoice_id = $1 ORDER BY o.despatch_date NULLS LAST, io.order_id`, [id]),
     query(
       `SELECT l.kind, l.id, l.amount, l.item_type, l.charge_type, l.reference_id, l.quantity, l.comments, l.invoice_date,
               l.payload, a.po_reference
@@ -308,20 +376,20 @@ async function invoiceDetail(req, res, url, id) {
       [id]
     ),
     historyStart(),
+    review.reviewsFor({ invoiceId: id }),
+    review.invoiceReview(id),
+    review.events({ invoiceId: id, limit: 200 }),
   ]);
   const beforeHistory = !!(hist && inv.invoice_date && new Date(inv.invoice_date) < hist);
 
+  const ca = inv.client_id ? await engine.clientAudit(inv.client_id) : null;
+  let open = 0;
   const orders = lines.map(l => {
-    const flags = [];
+    const flags = lineFlags(l, beforeHistory);
     const { reworkItems, notes } = parseComments(l.comments);
-    const note = notes.join(' · ') || null;
-    if (l.others) flags.push({ code: 'double_billed', severity: 'error', text: `Also billed on invoice ${l.others.map(o => o.invoiceId).join(', ')}` });
-    if (l.order_known && l.status_name === 'Cancelled') flags.push({ code: 'cancelled', severity: 'error', text: 'Order is cancelled' });
-    if (l.order_known && !l.despatch_date && l.status_name !== 'Cancelled') flags.push({ code: 'not_despatched', severity: 'error', text: 'Order has not been despatched' });
-    if (!l.order_known && !beforeHistory) flags.push({ code: 'order_missing', severity: 'warning', text: 'Order no longer exists in Mintsoft' });
-    if (Number(l.cost_postage_cost) > 0 && Number(l.postage_cost) < Number(l.cost_postage_cost)) flags.push({ code: 'postage_below_cost', severity: 'warning', text: `Postage charged £${r2(l.postage_cost).toFixed(2)} is below courier cost £${r2(l.cost_postage_cost).toFixed(2)}` });
-    if (!Number(l.total_cost)) flags.push({ code: 'zero_charge', severity: 'warning', text: 'Nothing charged for this order' });
-    if (note) flags.push({ code: ZEROED.test(note) ? 'manual_zeroing' : 'manual_note', severity: ZEROED.test(note) ? 'warning' : 'info', text: note });
+    const e = ca?.lines.get(l.id);
+    if (e) flags.push(...e.flags.map(f => ({ ...f })));
+    open += attachReviews(`line:${l.id}`, flags, reviews);
     return {
       lineId: l.id, orderId: l.order_id, orderNumber: l.order_number, reference: l.external_reference,
       orderDate: l.order_date, despatchDate: l.despatch_date, status: l.status_name, courier: l.courier_service_name,
@@ -334,16 +402,11 @@ async function invoiceDetail(req, res, url, id) {
       postageMargin: Number(l.cost_postage_cost) > 0 ? r2(Number(l.postage_cost || 0) - Number(l.cost_postage_cost)) : null,
       vatFreePostage: n(l.vat_free_postage_cost), packaging: n(l.packaging_cost), rework: n(l.rework_cost), admin: n(l.admin_fee),
       total: n(l.total_cost), billedAt: l.invoice_date, reworkItems, notes, flags,
+      expected: e?.expected || null,
     };
   });
 
-  const ca = inv.client_id ? await engine.clientAudit(inv.client_id) : null;
   const month = inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('en-CA', { timeZone: 'Europe/London' }).slice(0, 7) : null;
-  for (const o of orders) {
-    const e = ca?.lines.get(o.lineId);
-    o.expected = e?.expected || null;
-    if (e) o.flags.push(...e.flags);
-  }
   const sumLines = col => r2(lines.reduce((s, l) => s + (Number(l[col]) || 0), 0));
   const orderSums = Object.fromEntries(CATEGORIES.filter(c => c.line).map(c => [c.line, sumLines(c.line)]));
   const extraSums = {}, extraCounts = {};
@@ -354,24 +417,55 @@ async function invoiceDetail(req, res, url, id) {
   }
   const categories = buildCategories(inv, { orderSums, orderLines: lines.length, extraSums, extraCounts }, beforeHistory);
   const integ = integrityOf(categories);
+  // Header vs lines is itself a finding when they differ.
+  const invoiceFlags = Math.abs(integ.difference) >= 0.01
+    ? [{ code: 'lines_differ', severity: 'warning', value: integ.difference, text: `The invoice total differs from the sum of its lines by £${integ.difference.toFixed(2)}` }] : [];
+  open += attachReviews(`invoice:${id}`, invoiceFlags, reviews);
+  const extraOut = extras.map(e => {
+    const ex = e.kind === 'goods_in' ? ca?.extras.get(e.id) : null;
+    const flags = ex ? ex.flags.map(f => ({ ...f })) : [];
+    open += attachReviews(`extra:${e.kind}:${e.id}`, flags, reviews);
+    return {
+      kind: e.kind, id: e.id, amount: n(e.amount), itemType: e.item_type, chargeType: e.charge_type, referenceId: e.reference_id,
+      poReference: e.po_reference, quantity: n(e.quantity), comments: e.comments, date: e.invoice_date,
+      detail: e.kind === 'goods_in' && e.payload ? {
+        units: e.payload.NumberOfUnits, unitCost: e.payload.UnitCost, unitTotal: e.payload.TotalUnitCost, adminCost: e.payload.AdminCost,
+        skus: e.payload.NumberOfSkus, skuCost: e.payload.SkuCost, deliverySizeCost: e.payload.DeliverySizeCost,
+      } : null,
+      expected: ex?.expected || null, flags,
+    };
+  });
+  // Open (unreviewed) warnings with a £ value, from the expected-vs-billed checks.
+  const openValued = [...orders.flatMap(o => o.flags), ...extraOut.flatMap(e => e.flags)]
+    .filter(f => f.severity === 'warning' && !f.review && f.value != null).map(f => f.value);
+  const openTotals = { ...sumValues(openValued), open: openValued.length };
   const engineSummary = ca ? {
     hasReworkRules: ca.hasReworkRules,
     picking: ca.picking.months[month] || null, pickingMethod: ca.picking.method, excludedSkus: ca.picking.excludedSkus,
     rework: ca.accuracy.rework?.byMonth?.[month] || null,
-    totals: ca.byInvoice[inv.id] || { warnings: 0, info: 0, under: 0, over: 0, codes: {} },
+    totals: (({ findings, ...t }) => ({ ...t, ...openTotals }))(ca.byInvoice[inv.id] || { warnings: 0, info: 0, under: 0, over: 0, codes: {} }),
     minConfidence: engine.MIN_CONFIDENCE,
   } : null;
   const flagCounts = {};
   orders.forEach(o => o.flags.forEach(f => { flagCounts[f.code] = (flagCounts[f.code] || 0) + 1; }));
+  extraOut.forEach(o => o.flags.forEach(f => { flagCounts[f.code] = (flagCounts[f.code] || 0) + 1; }));
+  const reviewed = { ok: 0, credit: 0, charge: 0, creditAmount: 0, chargeAmount: 0 };
+  for (const r of reviews.values()) {
+    reviewed[r.status] = (reviewed[r.status] || 0) + 1;
+    if (r.status === 'credit') reviewed.creditAmount = r2(reviewed.creditAmount + (r.amount || 0));
+    if (r.status === 'charge') reviewed.chargeAmount = r2(reviewed.chargeAmount + (r.amount || 0));
+  }
 
-  return res.json(200, {
+  return {
     invoice: {
       id: inv.id, clientId: inv.client_id, clientName: inv.client_name, name: inv.name, date: inv.invoice_date,
       updatedAt: inv.updated_at, detailSyncedAt: inv.detail_synced_at, comments: inv.comments,
       parcels: inv.number_of_parcels, items: inv.number_of_items, total: headerTotal(inv), beforeHistory,
     },
+    review: { ...status, open, reviewed },
     categories,
     integrity: { ...integ, orderDetailMissing: integ.unavailable.includes('picking') || integ.unavailable.includes('postage') },
+    invoiceFlags,
     postage: (() => {
       const known = lines.filter(l => Number(l.cost_postage_cost) > 0);
       const charged = r2(known.reduce((s, l) => s + (Number(l.postage_cost) || 0), 0));
@@ -385,15 +479,168 @@ async function invoiceDetail(req, res, url, id) {
     flagCounts,
     engine: engineSummary,
     orders,
-    extras: extras.map(e => ({
-      kind: e.kind, id: e.id, amount: n(e.amount), itemType: e.item_type, chargeType: e.charge_type, referenceId: e.reference_id,
-      poReference: e.po_reference, quantity: n(e.quantity), comments: e.comments, date: e.invoice_date,
-      detail: e.kind === 'goods_in' && e.payload ? {
-        units: e.payload.NumberOfUnits, unitCost: e.payload.UnitCost, unitTotal: e.payload.TotalUnitCost, adminCost: e.payload.AdminCost,
-        skus: e.payload.NumberOfSkus, skuCost: e.payload.SkuCost, deliverySizeCost: e.payload.DeliverySizeCost,
-      } : null,
-    })),
+    extras: extraOut,
+    trail: trail.map(eventOut),
+  };
+}
+
+const eventOut = e => ({
+  id: e.id, at: e.at, actor: e.actor, action: e.action, clientId: e.client_id, invoiceId: e.invoice_id,
+  subject: e.subject, check: e.check_code, before: e.before, after: e.after, note: e.note,
+});
+
+async function invoiceDetail(req, res, url, id) {
+  const data = await invoiceData(id);
+  if (!data) return res.json(404, { error: 'Invoice not found' });
+  return res.json(200, data);
+}
+
+// ── Review workflow (stage I3) ───────────────────────────────────────────────
+
+const actorOf = session => permissions.normalize(session.username) || 'user';
+const reply = (res, r) => res.json(r.status || 200, r.error ? { error: r.error } : r);
+
+async function putReview(req, res, session) {
+  const b = await req.json().catch(() => ({}));
+  return reply(res, await review.setReview(b, actorOf(session)));
+}
+
+async function putInvoiceReview(req, res, id, session) {
+  const b = await req.json().catch(() => ({}));
+  // The open count recorded with a sign-off is worked out here, not taken from the request.
+  const data = b.status === 'signed_off' ? await invoiceData(id) : null;
+  if (b.status === 'signed_off' && !data) return res.json(404, { error: 'Invoice not found' });
+  return reply(res, await review.setInvoiceStatus(id, b, actorOf(session), data ? data.review.open : 0));
+}
+
+async function eventsRoute(req, res, url) {
+  const invoiceId = parseInt(url.searchParams.get('invoiceId'), 10);
+  const clientId = parseInt(url.searchParams.get('clientId'), 10);
+  const rows = await review.events({ invoiceId: Number.isFinite(invoiceId) ? invoiceId : null, clientId: Number.isFinite(clientId) ? clientId : null, limit: url.searchParams.get('limit') });
+  return res.json(200, { events: rows.map(eventOut) });
+}
+
+// ── Order drill-down ─────────────────────────────────────────────────────────
+
+async function orderDetail(req, res, url, id) {
+  const x = await engine.explainOrder(id);
+  if (!x) return res.json(404, { error: 'Order not found' });
+  const hist = await historyStart();
+  const rows = x.lines.length ? await query(`${LINE_SQL} WHERE io.id = ANY($1::int[])`, [x.lines.map(l => l.lineId)]) : [];
+  const byLine = new Map(rows.map(r => [r.id, r]));
+  const invIds = [...new Set(x.lines.map(l => l.invoiceId))];
+  const [reviews, statuses, invDates] = await Promise.all([
+    review.reviewsFor({ subjects: [...x.lines.map(l => `line:${l.lineId}`), `order:${id}`] }),
+    review.invoiceSummaries(invIds),
+    invIds.length ? query(`SELECT id, invoice_date FROM invoices WHERE id = ANY($1::int[])`, [invIds]) : [],
+  ]);
+  const dateOf = new Map(invDates.map(r => [r.id, r.invoice_date]));
+  for (const l of x.lines) {
+    const row = byLine.get(l.lineId);
+    const beforeHistory = !!(hist && dateOf.get(l.invoiceId) && new Date(dateOf.get(l.invoiceId)) < hist);
+    l.flags = [...(row ? lineFlags(row, beforeHistory) : []), ...l.flags.map(f => ({ ...f }))];
+    l.open = attachReviews(`line:${l.lineId}`, l.flags, reviews);
+    l.invoiceStatus = statuses.get(l.invoiceId)?.status || 'not_reviewed';
+  }
+  return res.json(200, x);
+}
+
+// ── Month-to-date preview ────────────────────────────────────────────────────
+
+async function previewRoute(req, res, url) {
+  const clientId = parseInt(url.searchParams.get('clientId'), 10);
+  if (Number.isFinite(clientId)) {
+    const client = await queryOne(`SELECT id, name FROM clients WHERE id = $1`, [clientId]);
+    if (!client) return res.json(404, { error: 'Client not found' });
+    return res.json(200, { client, ...(await engine.previewClient(clientId)) });
+  }
+  // Every client with a running total this month.
+  const month = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' }).slice(0, 7);
+  const rows = await query(
+    `SELECT a.client_id, c.name, a.source_updated_at,
+            (a.picking_cost + a.postage_cost + a.vat_free_postage_cost + a.storage_cost + a.goods_in_cost + a.returns_cost
+             + a.rework_cost + a.packaging_cost + a.generic_items_cost + a.collections_cost + a.admin_fee) AS total
+     FROM invoice_accruals a JOIN clients c ON c.id = a.client_id
+     WHERE a.period_month = $1::date ORDER BY c.name`, [`${month}-01`]);
+  const clients = [];
+  for (const r of rows.filter(x => Number(x.total) > 0)) {
+    const p = await engine.previewClient(r.client_id);
+    clients.push({ clientId: r.client_id, clientName: r.name, accrual: p.totals.accrual, orders: p.orders, accrualUpdatedAt: p.accrualUpdatedAt,
+      modelledAccrual: p.totals.modelledAccrual, modelledExpected: p.totals.modelledExpected, modelledDifference: p.totals.modelledDifference,
+      differs: p.categories.filter(c => c.status === 'differs').map(c => c.key) });
+  }
+  return res.json(200, { month, clients });
+}
+
+// ── Findings export (CSV) ────────────────────────────────────────────────────
+
+const csvCell = v => {
+  if (v == null) return '';
+  const s = String(v);
+  // Neutralise spreadsheet formulas; quote anything with separators.
+  const safe = /^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s) ? `'${s}` : s;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+};
+
+async function findingsCsv(req, res, url) {
+  const range = monthRange(url);
+  const clientId = parseInt(url.searchParams.get('clientId'), 10) || null;
+  const severities = new Set((url.searchParams.get('severity') || 'error,warning').split(','));
+  const params = [range.fromDate, range.toDate];
+  const clientSql = clientId ? `AND i.client_id = $${params.push(clientId)}` : '';
+  const [invoices, hist] = await Promise.all([
+    query(`SELECT i.id, i.name, i.invoice_date, i.client_id, c.name AS client_name FROM invoices i LEFT JOIN clients c ON c.id = i.client_id
+           WHERE i.invoice_date >= $1::date AND i.invoice_date < $2::date ${clientSql} ORDER BY i.invoice_date, c.name`, params),
+    historyStart(),
+  ]);
+  const head = ['Invoice', 'Invoice date', 'Client', 'Order', 'Finding', 'Severity', 'Detail', 'Value (£)', 'Review', 'Review amount (£)', 'Review note', 'Reviewed by', 'Reviewed at', 'Invoice review', 'Finding key'];
+  const out = [head];
+  for (const inv of invoices) {
+    const data = await invoiceData(inv.id);
+    if (!data) continue;
+    const date = inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('en-GB', { timeZone: 'Europe/London' }) : '';
+    const push = (order, f) => {
+      if (!severities.has(f.severity)) return;
+      out.push([inv.id, date, inv.client_name, order, f.code, f.severity, f.text, f.value == null ? '' : Number(f.value).toFixed(2),
+        f.review?.status || 'open', f.review?.amount == null ? '' : f.review.amount.toFixed(2), f.review?.note || '', f.review?.by || '',
+        f.review?.at ? new Date(f.review.at).toISOString() : '', data.review.status, `${f.subject}|${f.check}`]);
+    };
+    data.invoiceFlags.forEach(f => push('', f));
+    data.orders.forEach(o => o.flags.forEach(f => push(o.orderNumber || `#${o.orderId}`, f)));
+    data.extras.forEach(e => e.flags.forEach(f => push(`${e.kind === 'goods_in' ? 'Goods in' : e.kind} ${e.poReference || e.referenceId || e.id}`, f)));
+  }
+  const body = '﻿' + out.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+  res.writeHead(200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="invoice-audit-findings-${range.from}-to-${range.to}.csv"`,
+    'Cache-Control': 'no-store',
   });
+  return res.end(body);
+}
+
+// ── The owner's audit rules (C11) ────────────────────────────────────────────
+
+async function rulesRoute(req, res, url, id, session) {
+  if (req.method === 'GET') {
+    const clientId = parseInt(url.searchParams.get('clientId'), 10);
+    const cid = Number.isFinite(clientId) ? clientId : null;
+    const rules = await review.listRules(cid);
+    // Matches and findings per rule, for the client asked about.
+    const stats = cid != null ? Object.fromEntries((await engine.clientAudit(cid)).auditRules.map(r => [r.id, r.stats])) : {};
+    return res.json(200, {
+      rules: rules.map(r => ({ ...r, describe: describeExpectation(r.expectation), stats: stats[r.id] || null })),
+      fields: SUPPORTED_FIELDS, operators: OPERATORS, expectations: EXPECTATIONS,
+      categories: Object.entries(RULE_CATEGORIES).map(([key, c]) => ({ key, label: c.label })),
+    });
+  }
+  let r;
+  if (req.method === 'POST' && id == null) r = await review.saveRule(null, await req.json().catch(() => ({})), actorOf(session));
+  else if (req.method === 'PUT' && id != null) r = await review.saveRule(id, await req.json().catch(() => ({})), actorOf(session));
+  else if (req.method === 'DELETE' && id != null) r = await review.deleteRule(id, actorOf(session));
+  else return res.json(405, { error: 'Method not allowed' });
+  if (r.ok) for (const cid of new Set(r.clientsAffected || [])) engine.forget(cid ?? null);
+  const { clientsAffected, ...body } = r;
+  return reply(res, body);
 }
 
 // ── Access (owner only) ──────────────────────────────────────────────────────
@@ -401,15 +648,27 @@ async function invoiceDetail(req, res, url, id) {
 async function access(req, res, url, session) {
   if (!(await permissions.isOwner(session))) return res.json(403, { error: 'Only the owner can manage access to Invoice Audit' });
   const actor = session.username || 'owner';
-  if (req.method === 'GET') return res.json(200, await permissions.listAccess('invoice_audit'));
+  if (req.method === 'GET') {
+    const [view, rev] = await Promise.all([permissions.listAccess('invoice_audit'), permissions.listAccess('invoice_audit_review')]);
+    const events = [...new Map([...view.events, ...rev.events].map(e => [e.id, e])).values()].sort((a, b) => b.id - a.id).slice(0, 50);
+    return res.json(200, { ...view, reviewers: rev.grants.map(g => g.username), events });
+  }
+  // permission: 'invoice_audit' (view) or 'invoice_audit_review' (review and sign off; implies view).
+  const which = p => (p === 'invoice_audit_review' ? 'invoice_audit_review' : 'invoice_audit');
   if (req.method === 'POST') {
     const b = await req.json().catch(() => ({}));
+    const perm = which(b.permission);
     const r = await permissions.grant(b.username, 'invoice_audit', actor);
-    return res.json(r.error ? 400 : 200, r);
+    if (r.error || perm === 'invoice_audit') return res.json(r.error ? 400 : 200, r);
+    const r2 = await permissions.grant(b.username, perm, actor);
+    return res.json(r2.error ? 400 : 200, r2);
   }
   if (req.method === 'DELETE') {
-    const r = await permissions.revoke(url.searchParams.get('username'), 'invoice_audit', actor);
-    return res.json(200, r);
+    const user = url.searchParams.get('username');
+    const perm = which(url.searchParams.get('permission'));
+    // Removing view access removes reviewing too.
+    if (perm === 'invoice_audit') await permissions.revoke(user, 'invoice_audit_review', actor);
+    return res.json(200, await permissions.revoke(user, perm, actor));
   }
   return res.json(405, { error: 'Method not allowed' });
 }
@@ -420,48 +679,72 @@ async function clientRates(req, res, url, id) {
   const client = await queryOne(`SELECT id, name, active FROM clients WHERE id = $1`, [id]);
   if (!client) return res.json(404, { error: 'Client not found' });
   const ca = await engine.clientAudit(id);
-  const { lines, byInvoice, ...rest } = ca;
+  const { lines, byInvoice, extras, internal, ...rest } = ca;
   return res.json(200, { client, ...rest, minConfidence: engine.MIN_CONFIDENCE });
 }
 
 // Confirm (or correct) a rework item price from a date; DELETE removes one.
+// Both are recorded in the audit trail.
 async function clientPrices(req, res, url, id, session) {
+  const actor = actorOf(session);
   if (req.method === 'PUT') {
     const b = await req.json().catch(() => ({}));
     const price = Number(b.price);
-    if (!b.itemKey || !/^(rule|name):/.test(b.itemKey)) return res.json(400, { error: 'itemKey is required' });
-    if (!Number.isFinite(price) || price < 0) return res.json(400, { error: 'price must be zero or more' });
+    if (!b.itemKey || !/^(rule|name):/.test(b.itemKey) || String(b.itemKey).length > 120) return res.json(400, { error: 'itemKey is required' });
+    if (!Number.isFinite(price) || price < 0 || price > 1e5) return res.json(400, { error: 'price must be zero or more' });
     if (!/^\d{4}-\d{2}-\d{2}$/.test(b.effectiveFrom || '')) return res.json(400, { error: 'effectiveFrom must be a date (YYYY-MM-DD)' });
+    if (!(await queryOne(`SELECT 1 FROM clients WHERE id = $1`, [id]))) return res.json(404, { error: 'Client not found' });
+    const note = b.note ? String(b.note).slice(0, 300) : null;
+    const before = await queryOne(`SELECT price, note FROM audit_rework_prices WHERE client_id = $1 AND item_key = $2 AND effective_from = $3`, [id, b.itemKey, b.effectiveFrom]);
     await query(
       `INSERT INTO audit_rework_prices (client_id, item_key, effective_from, price, note, confirmed_by) VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (client_id, item_key, effective_from) DO UPDATE SET price = EXCLUDED.price, note = EXCLUDED.note,
          confirmed_by = EXCLUDED.confirmed_by, confirmed_at = NOW()`,
-      [id, b.itemKey, b.effectiveFrom, price, b.note ? String(b.note).slice(0, 300) : null, session.username || 'user']
+      [id, b.itemKey, b.effectiveFrom, price, note, actor]
     );
+    await review.logEvent({ actor, action: 'price', clientId: id, subject: `price:${b.itemKey}@${b.effectiveFrom}`,
+      before: before && { price: Number(before.price), note: before.note }, after: { price, note }, note: 'Rework price confirmed' });
     engine.forget(id);
     return res.json(200, { ok: true });
   }
   if (req.method === 'DELETE') {
-    await query(`DELETE FROM audit_rework_prices WHERE client_id = $1 AND item_key = $2 AND effective_from = $3`,
-      [id, url.searchParams.get('itemKey'), url.searchParams.get('effectiveFrom')]);
+    const key = url.searchParams.get('itemKey'), from = url.searchParams.get('effectiveFrom');
+    const gone = await query(`DELETE FROM audit_rework_prices WHERE client_id = $1 AND item_key = $2 AND effective_from = $3 RETURNING price, note`, [id, key, from]);
+    if (gone.length) {
+      await review.logEvent({ actor, action: 'price', clientId: id, subject: `price:${key}@${from}`,
+        before: { price: Number(gone[0].price), note: gone[0].note }, after: null, note: 'Confirmed price removed' });
+    }
     engine.forget(id);
     return res.json(200, { ok: true });
   }
   return res.json(405, { error: 'Method not allowed' });
 }
 
+// Changing anything needs the reviewing permission; viewing needs invoice_audit
+// only (checked centrally in index.js).
 async function handle(req, res, url, session) {
   const { pathname } = url;
-  const cm = pathname.match(/^\/api\/audit\/clients\/(\d+)$/);
-  if (cm && req.method === 'GET') return clientRates(req, res, url, parseInt(cm[1], 10));
-  const cp = pathname.match(/^\/api\/audit\/clients\/(\d+)\/prices$/);
-  if (cp) return clientPrices(req, res, url, parseInt(cp[1], 10), session);
+  const write = req.method !== 'GET' && pathname !== '/api/audit/access';
+  if (write && !(await permissions.has(session, 'invoice_audit_review'))) {
+    return res.json(403, { error: 'You can view Invoice Audit but not change it. Ask the owner for reviewing access.', code: 'permission_required', permission: 'invoice_audit_review' });
+  }
+  const id = re => { const m = pathname.match(re); return m ? parseInt(m[1], 10) : null; };
+  let x;
+  if ((x = id(/^\/api\/audit\/clients\/(\d+)$/)) != null && req.method === 'GET') return clientRates(req, res, url, x);
+  if ((x = id(/^\/api\/audit\/clients\/(\d+)\/prices$/)) != null) return clientPrices(req, res, url, x, session);
   if (pathname === '/api/audit/overview' && req.method === 'GET') return overview(req, res, url);
   if (pathname === '/api/audit/coverage' && req.method === 'GET') return coverage(req, res, url);
-  const m = pathname.match(/^\/api\/audit\/invoices\/(\d+)$/);
-  if (m && req.method === 'GET') return invoiceDetail(req, res, url, parseInt(m[1], 10));
+  if ((x = id(/^\/api\/audit\/invoices\/(\d+)$/)) != null && req.method === 'GET') return invoiceDetail(req, res, url, x);
+  if ((x = id(/^\/api\/audit\/invoices\/(\d+)\/review$/)) != null && req.method === 'PUT') return putInvoiceReview(req, res, x, session);
+  if (pathname === '/api/audit/reviews' && req.method === 'PUT') return putReview(req, res, session);
+  if (pathname === '/api/audit/events' && req.method === 'GET') return eventsRoute(req, res, url);
+  if ((x = id(/^\/api\/audit\/orders\/(\d+)$/)) != null && req.method === 'GET') return orderDetail(req, res, url, x);
+  if (pathname === '/api/audit/preview' && req.method === 'GET') return previewRoute(req, res, url);
+  if (pathname === '/api/audit/findings.csv' && req.method === 'GET') return findingsCsv(req, res, url);
+  if (pathname === '/api/audit/rules') return rulesRoute(req, res, url, null, session);
+  if ((x = id(/^\/api\/audit\/rules\/(\d+)$/)) != null) return rulesRoute(req, res, url, x, session);
   if (pathname === '/api/audit/access') return access(req, res, url, session);
   return res.json(404, { error: 'Not found' });
 }
 
-module.exports = { handle, CATEGORIES, headerTotal, monthRange, parseComments, buildCategories, integrityOf, HAS_MANUAL_LINE_SQL };
+module.exports = { handle, CATEGORIES, headerTotal, monthRange, parseComments, buildCategories, integrityOf, lineFlags, csvCell, HAS_MANUAL_LINE_SQL };

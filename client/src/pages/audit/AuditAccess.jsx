@@ -1,4 +1,5 @@
-// Invoice Audit — access (owner only): who else can open the module.
+// Invoice Audit — access (owner only): who else can open the module, and who
+// of them can also review findings, sign off invoices and edit rules and prices.
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { useSession } from '../../context/SessionContext'
@@ -9,6 +10,7 @@ export default function AuditAccess() {
   const { session } = useSession()
   const [data, setData] = useState(null)
   const [username, setUsername] = useState('')
+  const [asReviewer, setAsReviewer] = useState(false)
   const [status, setStatus] = useState({ msg: '', type: null })
   const [busy, setBusy] = useState(false)
 
@@ -33,9 +35,17 @@ export default function AuditAccess() {
   async function grant(e) {
     e.preventDefault()
     try {
-      const d = await call('POST', { username })
-      setStatus({ msg: d.granted ? `${username.trim().toLowerCase()} can now open Invoice Audit` : 'That user already has access', type: 'success' })
-      setUsername(''); load()
+      const d = await call('POST', { username, permission: asReviewer ? 'invoice_audit_review' : 'invoice_audit' })
+      setStatus({ msg: d.granted ? `${username.trim().toLowerCase()} can now ${asReviewer ? 'view and review' : 'view'} Invoice Audit` : 'That user already has this access', type: 'success' })
+      setUsername(''); setAsReviewer(false); load()
+    } catch (err) { setStatus({ msg: err.message, type: 'error' }) }
+  }
+
+  async function setReviewer(u, on) {
+    try {
+      if (on) await call('POST', { username: u, permission: 'invoice_audit_review' })
+      else await call('DELETE', null, `?username=${encodeURIComponent(u)}&permission=invoice_audit_review`)
+      setStatus({ msg: on ? `${u} can now review findings and sign off invoices` : `${u} can now only view`, type: 'success' }); load()
     } catch (err) { setStatus({ msg: err.message, type: 'error' }) }
   }
 
@@ -74,6 +84,9 @@ export default function AuditAccess() {
                 {data.grants.map(g => (
                   <div key={g.username} className="flex items-center gap-3 py-1.5 border-b border-brand-border/60 last:border-0">
                     <span className="font-mono text-sm text-ink flex-1">{g.username}</span>
+                    <label className="flex items-center gap-1.5 font-mono text-[11px] text-ink-muted" title="Review findings, sign off invoices, confirm prices and edit audit rules">
+                      <input type="checkbox" checked={(data.reviewers || []).includes(g.username)} disabled={busy} onChange={e => setReviewer(g.username, e.target.checked)} /> can review
+                    </label>
                     <span className="font-mono text-[10px] text-ink-muted">added {fmtDateTime(g.granted_at)} by {g.granted_by}</span>
                     <button onClick={() => revoke(g.username)} disabled={busy} className="font-mono text-[11px] border border-danger/40 text-danger rounded px-2.5 py-1 hover:bg-danger hover:text-white disabled:opacity-40">Remove</button>
                   </div>
@@ -85,16 +98,19 @@ export default function AuditAccess() {
                   <input value={username} onChange={e => setUsername(e.target.value)} placeholder="name@premiumfulfilment.co.uk"
                     className="normal-case tracking-normal bg-brand-bg border border-brand-border rounded px-3 py-2 font-mono text-sm text-ink focus:outline-none focus:border-primary" />
                 </label>
+                <label className="flex items-center gap-1.5 font-mono text-[11px] text-ink-muted pb-2.5">
+                  <input type="checkbox" checked={asReviewer} onChange={e => setAsReviewer(e.target.checked)} /> can also review
+                </label>
                 <button type="submit" disabled={busy || !username.trim()} className="bg-primary hover:bg-primary-hover text-white font-sans font-bold text-sm rounded px-4 py-2 disabled:opacity-40">Give access</button>
               </form>
-              <p className="font-mono text-[10px] text-ink-muted">Only warehouse users can open the module; a client login is refused even if added here.</p>
+              <p className="font-mono text-[10px] text-ink-muted">Only warehouse users can open the module; a client login is refused even if added here. Viewers see everything; reviewers can also mark findings, sign off invoices, confirm prices and edit audit rules. Every change they make is recorded in the audit trail.</p>
             </section>
 
             <section className="bg-brand-surface border border-brand-border rounded-lg p-5">
               <div className="font-sans font-bold text-sm text-ink mb-2">History</div>
               {data.events.map(e => (
                 <div key={e.id} className="font-mono text-[11px] text-ink py-1 border-b border-brand-border/60 last:border-0">
-                  <span className="text-ink-muted">{fmtDateTime(e.at)}</span> · {e.actor} · {e.action} {e.username}
+                  <span className="text-ink-muted">{fmtDateTime(e.at)}</span> · {e.actor} · {e.action} {e.username}{e.permission === 'invoice_audit_review' ? ' (reviewing)' : ''}
                 </div>
               ))}
             </section>

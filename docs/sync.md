@@ -53,3 +53,4 @@ The `clients` row shows more clients in the database than in Mintsoft's list. Th
 - `client_rate_cards` / `client_order_rules`: snapshots of each client's Mintsoft pricing fields and order rules, written only when they change (no contact or address data).
 - Reconcile: `node server/sync/cli.js reconcile invoice_detail` (last 100 days, part of the weekly reconcile) or `invoice_detail_all` (every invoice, ~1,060 calls).
 - Per-order detail only exists once Mintsoft confirms an invoice. The current month has totals only (accruals).
+- `invoice_accruals.source_updated_at` is the accrual summary's `LastUpdated`: the time of Mintsoft's latest daily billing run that changed that client's running total (about 19:05 London). Invoice Audit's month-to-date preview uses it as the end of the window of orders in the running total. The summary has `ID` 0, so its order lines cannot be fetched until the invoice is confirmed.

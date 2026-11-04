@@ -76,9 +76,10 @@ For every order Premium Fulfilment invoices, show exactly what was charged, line
 | `client_rate_cards(client_id, captured_at, card JSONB)` | Rate-card snapshots, written when the card changes |
 | `client_order_rules(client_id, captured_at, rules JSONB)` | Order-rule snapshots, written when they change |
 | `audit_rework_prices(client_id, item, price, source, confirmed_by)` | Rework item prices (inferred / confirmed) |
-| `audit_rules` | Owner-defined audit rules |
-| `audit_findings(invoice_id, order_id, check, severity, expected, billed, variance, status, note, reviewed_by)` | Results of each run and their review state |
-| `audit_invoice_reviews(invoice_id, status, signed_off_by, at, note)` | Invoice sign-off |
+| `audit_rules(client_id NULL = every client, name, condition_type, conditions, expectation, effective_from, active)` | Owner-defined audit rules (I3) |
+| `audit_reviews(subject, check_code, client_id, invoice_id, status, amount, note, updated_by)` | Review of one finding (I3; findings themselves are recomputed, not stored) |
+| `audit_invoice_reviews(invoice_id, status, note, updated_by, updated_at)` | Invoice status: not reviewed, in review, signed off (I3) |
+| `audit_events(at, actor, action, client_id, invoice_id, subject, check_code, before, after, note)` | Append-only audit trail (I3) |
 
 Backfill: about 207 confirmed invoices × 5 detail calls ≈ 1,000 read-only calls, once (a few minutes). After that, about 120 calls a month when the new invoices land.
 
@@ -105,9 +106,9 @@ Backfill: about 207 confirmed invoices × 5 detail calls ≈ 1,000 read-only cal
 **Model**: Sonnet 5 (UI from this spec); Opus 5.5 reviews the permission checks and money maths.
 **Work**: audit overview, findings review (statuses, notes, audit trail), invoice sign-off, custom audit rules builder, current-month preview vs accruals, CSV exports.
 **DoD**
-- [ ] A flagged line can be marked and noted; an invoice can be signed off; all of it appears in the audit trail.
-- [ ] The current-month preview total is within the accrual summary or the difference is explained per category.
-- [ ] Harness 0 failures; screenshots of overview, invoice audit and order drill-down.
+- [x] A flagged line can be marked and noted; an invoice can be signed off; all of it appears in the audit trail.
+- [x] The current-month preview total is within the accrual summary or the difference is explained per category.
+- [x] Harness 0 failures; screenshots of overview, invoice audit and order drill-down.
 
 ## Defaults (change any of these before I1 starts)
 
@@ -121,6 +122,7 @@ Backfill: about 207 confirmed invoices × 5 detail calls ≈ 1,000 read-only cal
 | Stage | Date | Branch | Model | Evidence |
 |---|---|---|---|---|
 | I1 | 2026-11-04 | `v3/i1-invoice-audit` | Opus 5.5 | Backfill 212 invoices → 17,570 order lines + 1,666 other lines in 25–27 s (1,060 calls); reconcile `invoice_detail_all`: 0 missing / extra / drift on every line and all 212 invoice headers; integrity 211/212 invoices equal their lines to the penny (all since Jul 2025; the exception is a Feb 2025 "bulk adjustment" at −£0.02 rounding over 139 goods-in lines); coverage Aug–Oct 2026: 0 unbilled, 0 double-billed, 0 billed while cancelled/undespatched, 20 zero-charge or noted lines; `npm test` 18/18; harness 72/72 (22 new access checks) |
+| I3 | 2026-11-04 | `v3/i3-review-workflow` | Opus 5.5 | Review round trip on invoice #348 (Lawful London, Oct 2026), all in the trail: a finding marked "to credit" with a note (open 3 → 2, invoice moved to "in review" by itself); sign-off with open findings refused without a note, then accepted with one (open count recorded); a change on the signed-off invoice refused (409); reopen and reset. View-only users get 403 on every change; a reviewer can mark findings. Preview vs Mintsoft's running total, 4 Nov: every one of 18 clients matches or is explained per category (picking, rework and admin to the penny for 12 of the 14 with order charges; Luff Sleep explained by 3 bulk store orders and 2 never-priced rework items; Amaura's pattern too weak to judge £2.46). Goods-in since Jul 2025: 45 warnings. `npm test` 42/42; harness 139/139 (57 new); screenshots `wh-34` overview, `wh-30` invoice audit, `wh-31` order drill-down, `wh-32` preview, `wh-33` rules |
 | I2 | 2026-11-04 | `v3/i2-rules-engine` | Opus 5.5 | Serendipity rework Aug+Sep 2026 (Oct not yet invoiced): 801/810 reproduced (98.9 %), every other order listed with its reason (5 product edited after billing, 4 manually zeroed; 4 more uncertain, missing dimensions); since Feb 2026 6,356/6,375 (99.7 %). Picking Aug+Sep: Mexeco (per item) 141/141, Afida (per order + SKU + unit) 115/115, Serendipity (per order line) 810/810. `npm test` 30/30; harness 82/82 |
 
 I1 notes: how Mintsoft builds an invoice (worked out from the data, not documented by Mintsoft)
@@ -143,3 +145,14 @@ I2 notes: what the data showed (and the engine now uses)
 - Hand-added rework at £0.00 is flagged with the item's usual price (Lawful London: 15 lines).
 
 Moved to I3: goods-in rate checks (B7), owner-defined audit rules (C11), postage outliers (D14), plus the review workflow already planned there.
+
+I3 notes: review workflow, preview and the checks moved from I2
+- A finding is identified by its subject and check: `line:<invoice line>`, `extra:goods_in:<line>`, `invoice:<id>` (header ≠ lines) or `order:<id>` (despatched, never billed), plus the flag code (`audit_rule:<id>` for your own rules). Errors and warnings need a review; notes can be reviewed but never count as open. Reviews live in `audit_reviews`; invoice status in `audit_invoice_reviews`. Planned `audit_findings` was not needed: findings are recomputed from the data, so a resync or a corrected rule updates them, and reviews attach by key.
+- Statuses: a finding is OK, to credit or to charge (the last two need a note and can carry an amount). An invoice goes Not reviewed → In review (automatically, at its first review) → Signed off. Signing off with open findings needs a note, and the number left open is recorded. A signed-off invoice is locked (409) until it is reopened.
+- Every review, invoice status change, price confirmation and audit-rule change is written to `audit_events` in the same transaction as the change, so the trail cannot miss one.
+- Two levels of access: `invoice_audit` (view) and `invoice_audit_review` (review, sign off, confirm prices, edit audit rules). The owner holds both and sets them on the Access page. The server checks every change; the UI only hides the controls.
+- Goods-in (B7), worked out from 2026 lines: admin = `AdminChargePerASN` + hours logged on the ASN × `HourRateChargeForASN` (Afida £8.45 = £4.45 + 0.1 h × £40; Rachel Winham £18.35 = £4.75 + 0.34 h × £40). Per unit and per SKU follow the card; the delivery charge must be one of the card's carton, pallet or container costs (the ASN's own type does not say which was billed). Mintsoft only exposes today's card. Lines billed before our first snapshot are checked only where most of the client's goods-in within ±45 days were charged at that card's rate; otherwise they are listed as "rate at the time unknown". The first version flagged any line near one card-rate line and raised 294 warnings; Mokee charged 9 of 10 ASNs in a month at £0 per unit against a £0.35 card. Since Jul 2025: 45 warnings (16 per-unit, 8 per-SKU, 21 admin, e.g. Mexeco container fees typed into admin) and 49 notes.
+- Postage (D14): a service is flat-rate in a month when at least 80 % of 10 or more orders paid the same per parcel. Orders on it charged differently are notes, never warnings (230 since Jul 2025).
+- Your own audit rules (C11) use the Mintsoft condition fields and operators the engine can evaluate, with four expectations: charges a rework item, charges at least £x, charges at most £x, or does not charge a category. They apply to one client or every client, optionally from an invoice date. Rules the audit cannot read are counted as "could not be read", never guessed.
+- Month-to-date preview: Mintsoft bills once a day at about 19:05 London. The accrual summary's `LastUpdated` is the latest run that changed the client's total. The orders in the running total are those despatched after the previous month's last run, up to that time; for Luff Sleep on 4 Nov the 73 orders match the summary's 73 parcels. The summary has no ID, so Mintsoft offers no per-order lines before the invoice. Picking uses the latest month with at least 15 orders, and the rate card when it reproduces at least as many orders as the learned pattern (KiDSiE's September pattern came from one single-unit order and could not know the extra-unit rate).
+- Preview vs Mintsoft, Nov 2026 (14 clients with a running total): picking, rework and admin match to the penny for 12. Luff Sleep is explained by 3 bulk store orders, which Mintsoft charges a flat rate by hand (in September £15–£30 each). Its BEDDING and SMALL-SUGAR rework items have never been invoiced, so their price is unknown (£12.62 for 25 items, about £0.50 each); confirm it under Rates & rules. Amaura's pattern reproduces only 79 % of orders, so its £2.46 difference is within the estimate.

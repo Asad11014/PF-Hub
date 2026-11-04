@@ -23,7 +23,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function waitSettled(page, ms = 25000) {
   const start = Date.now();
   while (Date.now() - start < ms) {
-    const busy = await page.evaluate(() => /Loading…|Running…|Fetching|Refreshing…|Building…|Recalculating|Loading dashboard|Loading charges|Loading settings|Loading forecast|Checking stock/.test(document.body.innerText)).catch(() => false);
+    const busy = await page.evaluate(() => /Loading…|Running…|Fetching|Refreshing…|Building…|Recalculating|Loading dashboard|Loading charges|Loading settings|Loading forecast|Checking stock|Loading [^\n]{0,40}…|Pricing this month|Working out this client/.test(document.body.innerText)).catch(() => false);
     if (!busy) break;
     await sleep(500);
   }
@@ -300,6 +300,100 @@ function attachLogging(page, persona) {
     expectIn('OWNER invoice page shows expected vs billed', invText, 'Possibly undercharged');
     expectIn('OWNER access page', await textOf(own, 'wh-26-audit-access', '/app/audit/access'), 'Who can see Invoice Audit');
 
+    // ── Stage I3: review workflow, sign-off, audit trail, drill-down, preview, rules ──
+    const ok = (label, cond, got = cond ? 'yes' : 'no') => results.expectations.push({ label, expected: ['yes'], got, ok: !!cond });
+    // An invoice with an open warning on an order line (the latest one in range).
+    const candidates = (ov.body?.invoices || []).filter(i => i.review?.open > 0 && i.review?.status !== 'signed_off' && i.orderLines > 0);
+    let target = null, det = null;
+    for (const c of candidates.slice(0, 8)) {
+      const d = await api(own, `OWNER invoice ${c.id} for review`, `/api/audit/invoices/${c.id}`);
+      const line = (d.body?.orders || []).find(o => o.orderId && o.flags.some(f => ['warning', 'error'].includes(f.severity) && !f.review));
+      if (line) { target = { inv: c, line, flag: line.flags.find(f => ['warning', 'error'].includes(f.severity) && !f.review) }; det = d.body; break; }
+    }
+    ok(`an invoice with an open finding to review (${target ? `#${target.inv.id} ${target.line.orderNumber} ${target.flag.check}` : 'none'})`, !!target);
+    if (target) {
+      const { inv: ti, line, flag } = target;
+      const rv = { subject: flag.subject, check: flag.check };
+      await api(wh, 'WH (view only) cannot mark a finding', '/api/audit/reviews', { method: 'PUT', data: { ...rv, status: 'ok' } }, { status: [403] });
+      await api(own, 'OWNER credit without a note is refused', '/api/audit/reviews', { method: 'PUT', data: { ...rv, status: 'credit' } }, { status: [400] });
+      await api(own, 'OWNER review with a forged subject is refused', '/api/audit/reviews', { method: 'PUT', data: { subject: 'line:999999999', check: flag.check, status: 'ok' } }, { status: [404] });
+      await api(own, 'OWNER marks the finding "to credit" with a note', '/api/audit/reviews', { method: 'PUT', data: { ...rv, status: 'credit', amount: Math.abs(flag.value || 1).toFixed(2), note: 'QA: credit on next invoice' } }, { status: [200] });
+      const d1 = (await api(own, 'OWNER invoice after review', `/api/audit/invoices/${ti.id}`, {}, { status: [200] })).body;
+      const f1 = d1?.orders?.find(o => o.lineId === line.lineId)?.flags.find(f => f.check === flag.check);
+      ok('finding shows its review (to credit, note)', f1?.review?.status === 'credit' && f1?.review?.note === 'QA: credit on next invoice', f1?.review?.status || 'none');
+      ok('invoice moved to "in review"', d1?.review?.status === 'in_review', d1?.review?.status);
+      ok('open findings went down by one', d1?.review?.open === det.review.open - 1, `${det.review.open} → ${d1?.review?.open}`);
+      ok('audit trail records the review', d1?.trail?.some(e => e.action === 'review' && e.subject === flag.subject && e.after?.status === 'credit' && e.actor === '__owner__'));
+      if (d1?.review?.open > 0) await api(own, 'OWNER sign-off with open findings needs a note', `/api/audit/invoices/${ti.id}/review`, { method: 'PUT', data: { status: 'signed_off' } }, { status: [400] });
+      await api(wh, 'WH (view only) cannot sign off', `/api/audit/invoices/${ti.id}/review`, { method: 'PUT', data: { status: 'signed_off', note: 'x' } }, { status: [403] });
+      await api(own, 'OWNER signs off the invoice', `/api/audit/invoices/${ti.id}/review`, { method: 'PUT', data: { status: 'signed_off', note: 'QA: remaining findings checked' } }, { status: [200] });
+      await api(own, 'OWNER cannot change a finding on a signed-off invoice', '/api/audit/reviews', { method: 'PUT', data: { ...rv, status: 'ok' } }, { status: [409] });
+      const d2 = (await api(own, 'OWNER invoice after sign-off', `/api/audit/invoices/${ti.id}`, {}, { status: [200] })).body;
+      ok('invoice is signed off', d2?.review?.status === 'signed_off', d2?.review?.status);
+      ok('audit trail records the sign-off with the open count', d2?.trail?.some(e => e.action === 'sign_off' && e.after?.openFindings === d1?.review?.open));
+      const ovAfter = (await api(own, 'OWNER overview after sign-off', `/api/audit/overview?from=2026-08&to=2026-10`, {}, { status: [200] })).body;
+      ok('overview shows the invoice as signed off', ovAfter?.invoices?.find(i => i.id === ti.id)?.review?.status === 'signed_off');
+      // Pages scroll inside their own panel, so a tall viewport is what captures them whole.
+      const shotText = async (name, url, row, height = 2600) => {
+        const p = await own.newPage();
+        await p.setViewportSize({ width: 1440, height });
+        await visit(p, name, url, { after: async pg => { if (row) { const r = pg.getByText(row, { exact: true }).first(); if (await r.count()) { await r.click(); await sleep(600); } } } });
+        const t = await p.evaluate(() => document.body.innerText).catch(() => ''); await p.close(); return t.toLowerCase();
+      };
+      const invShot = await shotText('wh-30-audit-invoice-review', `/app/audit/invoice/${ti.id}`, `▸ ${line.orderNumber}`, 4200);
+      expectIn('overview shows review status', await shotText('wh-34-audit-overview-review', '/app/audit', null, 2000), 'Signed off');
+      expectIn('invoice page shows sign-off', invShot, 'Signed off');
+      expectIn('invoice page shows the audit trail', invShot, 'Audit trail');
+      expectIn('invoice page shows the review note', invShot, 'QA: credit on next invoice');
+      // Order drill-down
+      const od = await api(own, 'OWNER order drill-down', `/api/audit/orders/${line.orderId}`, {}, { status: [200] });
+      ok('drill-down explains the billed line', od.body?.lines?.some(l => l.lineId === line.lineId && l.picking && l.flags.some(f => f.check === flag.check && f.review?.status === 'credit')));
+      expectIn('order drill-down page', await shotText('wh-31-audit-order', `/app/audit/order/${line.orderId}`), 'What the rules read');
+      // Reopen and put everything back.
+      await api(own, 'OWNER reopens the invoice', `/api/audit/invoices/${ti.id}/review`, { method: 'PUT', data: { status: 'in_review' } }, { status: [200] });
+      await api(own, 'OWNER reopens the finding', '/api/audit/reviews', { method: 'PUT', data: { ...rv, status: 'open' } }, { status: [200] });
+      await api(own, 'OWNER resets the invoice review', `/api/audit/invoices/${ti.id}/review`, { method: 'PUT', data: { status: 'not_reviewed' } }, { status: [200] });
+      const tr = (await api(own, 'OWNER trail for the invoice', `/api/audit/events?invoiceId=${ti.id}`, {}, { status: [200] })).body;
+      ok('trail keeps every step (review, sign-off, reopen, reset)', ['review', 'sign_off', 'reopen', 'invoice_status'].every(a => tr?.events?.some(e => e.action === a)));
+      // Reviewing permission
+      await api(own, 'OWNER grants reviewing to __wh__', '/api/audit/access', { method: 'POST', data: { username: '__wh__', permission: 'invoice_audit_review' } }, { status: [200] });
+      const meW = await api(wh, 'WH /api/me after reviewing grant', '/api/me', {}, { status: [200] });
+      ok('WH holds invoice_audit_review', meW.body?.permissions?.includes('invoice_audit_review'));
+      await api(wh, 'WH (reviewer) marks a finding OK', '/api/audit/reviews', { method: 'PUT', data: { ...rv, status: 'ok', note: 'QA reviewer' } }, { status: [200] });
+      await api(wh, 'WH (reviewer) reopens it', '/api/audit/reviews', { method: 'PUT', data: { ...rv, status: 'open' } }, { status: [200] });
+      await api(own, 'OWNER removes reviewing from __wh__', '/api/audit/access?username=__wh__&permission=invoice_audit_review', { method: 'DELETE' }, { status: [200] });
+      await api(own, 'OWNER resets the invoice review again', `/api/audit/invoices/${ti.id}/review`, { method: 'PUT', data: { status: 'not_reviewed' } }, { status: [200] });
+    }
+    // Findings export
+    {
+      const res = await own.request.fetch(`${BASE}/api/audit/findings.csv?from=2026-10&to=2026-10`);
+      const txt = await res.text();
+      ok(`findings CSV export (${res.status()}, ${txt.split('\n').length - 2} findings)`, res.status() === 200 && /text\/csv/.test(res.headers()['content-type'] || '') && txt.includes('Invoice,Invoice date,Client,Order,Finding'));
+    }
+    // Month-to-date preview vs Mintsoft's running total (DoD b)
+    const pv = await api(own, 'OWNER preview, all clients', '/api/audit/preview', {}, { status: [200] });
+    const pvClients = pv.body?.clients || [];
+    const unexplained = pvClients.filter(c => c.differs.length);
+    ok(`preview: every client's picking/rework/admin matches or is explained (${pvClients.length - unexplained.length}/${pvClients.length})`, pvClients.length > 0 && !unexplained.length,
+      unexplained.map(c => `${c.clientName}: ${c.differs.join(',')}`).join('; ') || `${pvClients.length} ok`);
+    const pv1 = await api(own, 'OWNER preview, Serendipity', '/api/audit/preview?clientId=10', {}, { status: [200] });
+    ok('preview has a billing window and categories', !!pv1.body?.categories?.length && (!pv1.body.accrualFound || !!pv1.body.window?.start));
+    expectIn('preview page', await textOf(own, 'wh-32-audit-preview', '/app/audit/preview?clientId=10'), 'This month so far');
+    // Your audit rules
+    const ruleBody = { name: 'QA: glass needs a box', clientId: 10, conditionType: 'AND', conditions: [{ field: 'OrderItemProductCategory', operator: 'Contains', value: 'QA-NO-SUCH-CATEGORY' }], expectation: { type: 'rework_item', item: 'DW-BOX' } };
+    await api(wh, 'WH (view only) cannot add an audit rule', '/api/audit/rules', { method: 'POST', data: ruleBody }, { status: [403] });
+    await api(own, 'OWNER audit rule with an unknown field is refused', '/api/audit/rules', { method: 'POST', data: { ...ruleBody, conditions: [{ field: 'ShippingZone', operator: 'Equals', value: 'UK' }] } }, { status: [400] });
+    const nr = await api(own, 'OWNER adds an audit rule', '/api/audit/rules', { method: 'POST', data: ruleBody }, { status: [200] });
+    const ruleId = nr.body?.rule?.id;
+    const rl = await api(own, 'OWNER lists audit rules with stats', '/api/audit/rules?clientId=10', {}, { status: [200] });
+    ok('new rule listed with its stats (0 matches)', rl.body?.rules?.some(r => r.id === ruleId && r.stats && r.stats.matched === 0));
+    await api(own, 'OWNER edits the audit rule', `/api/audit/rules/${ruleId}`, { method: 'PUT', data: { ...ruleBody, name: 'QA: renamed', active: false } }, { status: [200] });
+    expectIn('rates page lists your audit rules', await textOf(own, 'wh-33-audit-rules', '/app/audit/client/10'), 'QA: renamed');
+    await api(own, 'OWNER deletes the audit rule', `/api/audit/rules/${ruleId}`, { method: 'DELETE' }, { status: [200] });
+    const ev = await api(own, 'OWNER client trail', '/api/audit/events?clientId=10', {}, { status: [200] });
+    ok('trail records the rule added, changed and deleted', ['Rule added', 'Rule changed', 'Rule deleted'].every(n => ev.body?.events?.some(e => e.action === 'rule' && e.subject === `rule:${ruleId}` && e.note === n)));
+    ok('trail records price confirmations', ev.body?.events?.some(e => e.action === 'price' && e.subject === 'price:rule:SW-BOX@2099-01-01'));
+
     await api(own, 'OWNER revoke __wh__', '/api/audit/access?username=__wh__', { method: 'DELETE' }, { status: [200] });
     await api(wh, 'WH audit overview after revoke', '/api/audit/overview', {}, { status: [403] });
     await own.close(); await wh.close(); await cl.close();
@@ -315,6 +409,8 @@ function attachLogging(page, persona) {
     await api(ctx, 'ANON POST /api/sync/reconcile', '/api/sync/reconcile', { method: 'POST' }, { status: [401] });
     await api(ctx, 'ANON GET /api/admin/subscriptions', '/api/admin/subscriptions', {}, { status: [401] });
     await api(ctx, 'ANON GET /api/audit/overview', '/api/audit/overview', {}, { status: [401] });
+    await api(ctx, 'ANON PUT /api/audit/reviews', '/api/audit/reviews', { method: 'PUT', data: { subject: 'line:1', check: 'zero_charge', status: 'ok' } }, { status: [401] });
+    await api(ctx, 'ANON GET /api/audit/findings.csv', '/api/audit/findings.csv', {}, { status: [401] });
     await ctx.close();
   }
 

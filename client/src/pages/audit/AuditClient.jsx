@@ -3,9 +3,12 @@
 // and the picking pattern per month against the current rate card.
 import { useState, useEffect, useCallback } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { useSession } from '../../context/SessionContext'
 import StatusBar from '../../components/StatusBar'
 import StatCard  from '../../components/StatCard'
 import { gbp, fmtDate, fmtDateTime, fmtModel } from './format'
+import AuditRulesSection from './AuditRules'
+import { AuditTrail } from './Review'
 
 // Never round a near-miss up to 100%: 6,356 of 6,375 shows as 99.7%.
 const pct = (a, b) => { if (!b) return '—'; const p = (100 * a) / b; return a === b ? '100%' : `${p >= 99.95 ? '99.9' : p.toFixed(p >= 10 ? 1 : 0)}%` }
@@ -49,8 +52,15 @@ function PriceForm({ item, clientId, onDone, onError }) {
 
 export default function AuditClient() {
   const { id } = useParams()
+  const { hasPermission } = useSession()
+  const canReview = hasPermission('invoice_audit_review')
   const [data, setData] = useState(null)
+  const [events, setEvents] = useState([])
   const [status, setStatus] = useState({ msg: 'Working out this client’s rates…', type: 'loading' })
+  const loadEvents = useCallback(() => {
+    fetch(`/api/audit/events?clientId=${id}&limit=50`).then(r => r.json()).then(d => setEvents((d.events || []).filter(e => e.action === 'price' || e.action === 'rule'))).catch(() => {})
+  }, [id])
+  useEffect(() => { loadEvents() }, [loadEvents])
 
   const load = useCallback(async () => {
     try {
@@ -64,7 +74,7 @@ export default function AuditClient() {
   async function removeConfirmed(item, c) {
     if (!window.confirm(`Remove the confirmed price ${gbp(Number(c.price))} from ${fmtDate(c.effective_from)}?`)) return
     await fetch(`/api/audit/clients/${id}/prices?itemKey=${encodeURIComponent(item.key)}&effectiveFrom=${c.effective_from}`, { method: 'DELETE' })
-    setStatus({ msg: 'Confirmed price removed', type: 'success' }); load()
+    setStatus({ msg: 'Confirmed price removed', type: 'success' }); load(); loadEvents()
   }
 
   if (!data) return <div className="p-4 sm:p-7"><StatusBar message={status.msg} type={status.type} /></div>
@@ -82,6 +92,7 @@ export default function AuditClient() {
             Learned from this client’s billing · rate card {cardAt ? `captured ${fmtDateTime(cardAt)}` : 'not captured yet'} · rules {rulesAt ? `captured ${fmtDateTime(rulesAt)}` : 'not captured yet'}
           </div>
         </div>
+        <Link to={`/app/audit/preview?clientId=${id}`} className="ml-auto font-mono text-[11px] text-ink-muted hover:text-primary no-underline flex-shrink-0">This month so far</Link>
       </header>
 
       <div className="p-4 sm:p-7 space-y-5 max-w-6xl">
@@ -121,10 +132,10 @@ export default function AuditClient() {
                 {item.confirmed.map(c => (
                   <div key={c.effective_from} className="flex items-center gap-2 font-mono text-[11px] text-success">
                     ✓ {gbp(Number(c.price))} from {fmtDate(c.effective_from)} · {c.confirmed_by}{c.note ? ` · ${c.note}` : ''}
-                    <button onClick={() => removeConfirmed(item, c)} className="text-ink-muted hover:text-danger text-[10px] underline">remove</button>
+                    {canReview && <button onClick={() => removeConfirmed(item, c)} className="text-ink-muted hover:text-danger text-[10px] underline">remove</button>}
                   </div>
                 ))}
-                <PriceForm item={item} clientId={id} onDone={m => { setStatus({ msg: m, type: 'success' }); load() }} onError={m => setStatus({ msg: m, type: 'error' })} />
+                {canReview && <PriceForm item={item} clientId={id} onDone={m => { setStatus({ msg: m, type: 'success' }); load(); loadEvents() }} onError={m => setStatus({ msg: m, type: 'error' })} />}
               </div>
             ))}
           </div>
@@ -152,6 +163,10 @@ export default function AuditClient() {
           </table>
         </Section>
 
+        <Section title="Your audit rules" hint="Checks of your own, on top of Mintsoft’s rules. An order that breaks one becomes a finding on its invoice.">
+          <AuditRulesSection clientId={id} canReview={canReview} onStatus={setStatus} onChanged={() => { load(); loadEvents() }} />
+        </Section>
+
         <Section title={`Mintsoft order rules (${rules.length})`} hint={`${charging.length} add a rework charge; the others change couriers, holds or inserts and are shown for reference.`}>
           <table className="w-full text-left min-w-[760px]">
             <thead><tr className="font-mono text-[10px] uppercase tracking-wider text-ink-muted border-b border-brand-border">
@@ -170,6 +185,8 @@ export default function AuditClient() {
               </tr>))}</tbody>
           </table>
         </Section>
+
+        <AuditTrail events={events} title="Price and rule changes" subjectLabel={s => s} />
       </div>
     </div>
   )

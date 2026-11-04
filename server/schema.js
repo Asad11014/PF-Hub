@@ -366,6 +366,7 @@ async function ensureCoreSchema() {
   // (/Invoice/{id}/Orders) and one per goods-in / returns / other / collections
   // line. Fetched once per confirmed invoice, again whenever the invoice changes.
   await query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS detail_synced_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE invoice_accruals ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMPTZ`);
   await query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS detail_source_updated_at TIMESTAMPTZ`);
 
   await query(`
@@ -453,6 +454,76 @@ async function ensureCoreSchema() {
       confirmed_by   TEXT NOT NULL,
       confirmed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (client_id, item_key, effective_from)
+    )
+  `);
+
+  // ── Invoice Audit review workflow (stage I3) ──────────────────────────────
+  // A finding is identified by its subject and check:
+  //   subject 'line:<invoice_orders.id>' | 'order:<order id>' | 'invoice:<id>' | 'extra:<kind>:<id>'
+  //   check   the flag code (rework_missing, unbilled, double_billed, …)
+  // status: ok (checked, nothing to do) | credit (credit the client) | charge (charge the client)
+  await query(`
+    CREATE TABLE IF NOT EXISTS audit_reviews (
+      subject    TEXT NOT NULL,
+      check_code TEXT NOT NULL,
+      client_id  INTEGER,
+      invoice_id INTEGER,
+      status     TEXT NOT NULL,
+      amount     NUMERIC,
+      note       TEXT,
+      updated_by TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (subject, check_code)
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS audit_reviews_invoice_idx ON audit_reviews (invoice_id)`);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS audit_invoice_reviews (
+      invoice_id INTEGER PRIMARY KEY REFERENCES invoices(id) ON DELETE CASCADE,
+      status     TEXT NOT NULL DEFAULT 'not_reviewed',   -- not_reviewed | in_review | signed_off
+      note       TEXT,
+      updated_by TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  // Append-only trail of every review, sign-off, price confirmation and rule change.
+  await query(`
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id         SERIAL PRIMARY KEY,
+      at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      actor      TEXT NOT NULL,
+      action     TEXT NOT NULL,        -- review | sign_off | price | rule
+      client_id  INTEGER,
+      invoice_id INTEGER,
+      subject    TEXT,
+      check_code TEXT,
+      before     JSONB,
+      after      JSONB,
+      note       TEXT
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS audit_events_invoice_idx ON audit_events (invoice_id, id DESC)`);
+  await query(`CREATE INDEX IF NOT EXISTS audit_events_client_idx  ON audit_events (client_id, id DESC)`);
+
+  // Audit rules written by Invoice Audit users (beyond Mintsoft's own order rules),
+  // e.g. "orders containing category GLASS must carry DW-BOX".
+  //   expectation: { type: 'rework_item', item } | { type: 'min_charge' | 'max_charge', category, amount }
+  //              | { type: 'no_charge', category }   (server/audit-checks.js)
+  await query(`
+    CREATE TABLE IF NOT EXISTS audit_rules (
+      id             SERIAL PRIMARY KEY,
+      client_id      INTEGER REFERENCES clients(id) ON DELETE CASCADE,   -- NULL = every client
+      name           TEXT NOT NULL,
+      condition_type TEXT NOT NULL DEFAULT 'AND',
+      conditions     JSONB NOT NULL DEFAULT '[]',
+      expectation    JSONB NOT NULL,
+      effective_from DATE,                                                -- NULL = every invoice
+      active         BOOLEAN NOT NULL DEFAULT TRUE,
+      created_by     TEXT,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
 

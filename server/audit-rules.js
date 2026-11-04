@@ -94,6 +94,29 @@ function evaluateCondition(cond, f) {
   return null;
 }
 
+// The order's value for a field, for showing next to a condition.
+function fieldValue(field, f) {
+  if (LIST_FIELDS[field]) return LIST_FIELDS[field](f) || [];
+  if (NUMBER_FIELDS[field]) return NUMBER_FIELDS[field](f) ?? null;
+  if (TEXT_FIELDS[field]) return TEXT_FIELDS[field](f) ?? null;
+  return undefined; // a field the audit cannot read
+}
+
+// Operators the condition evaluator understands (for the audit rule builder).
+const OPERATORS = ['Equals', 'NotEqual', 'Contains', 'DoesNotContain', 'StartsWith', 'DoesNotStartWith', 'Empty', 'IsNotEmpty',
+  'GreaterThan', 'LessThan', 'EqualsOrGreaterThan', 'EqualsOrLessThan'];
+
+// Same as evaluateRule, with every condition's result and the order's value.
+function explainRule(rule, f) {
+  const conds = rule.OrderRuleConditions || [];
+  const { applies, unknownFields } = evaluateRule(rule, f);
+  const channelMismatch = !!(rule.ChannelId && f.channelId && Number(rule.ChannelId) !== Number(f.channelId));
+  return {
+    applies, unknownFields, channelMismatch,
+    conditions: conds.map(c => ({ field: c.Field, operator: c.Operator, value: c.Value, actual: fieldValue(c.Field, f) ?? null, result: evaluateCondition(c, f) })),
+  };
+}
+
 // → { applies: true | false | null, unknownFields: [...] }
 function evaluateRule(rule, f) {
   if (!rule.Active) return { applies: false, unknownFields: [] };
@@ -140,5 +163,5 @@ function expectedRework(rules, f) {
 }
 
 module.exports = {
-  SUPPORTED_FIELDS, CHARGING_ACTIONS, evaluateCondition, evaluateRule, parseParam, expectedRework,
+  SUPPORTED_FIELDS, OPERATORS, CHARGING_ACTIONS, evaluateCondition, evaluateRule, explainRule, fieldValue, parseParam, expectedRework,
 };

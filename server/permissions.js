@@ -12,6 +12,9 @@ const { query, queryOne } = require('./db');
 
 const PERMISSIONS = {
   invoice_audit: { name: 'Invoice Audit', paths: ['/api/audit/'] },
+  // Review findings, sign off invoices, confirm prices and edit audit rules.
+  // Without it a user with invoice_audit can only view. Checked in server/audit.js.
+  invoice_audit_review: { name: 'Invoice Audit reviewing', paths: [] },
 };
 const PERMISSION_KEYS = Object.keys(PERMISSIONS);
 const OWNERS_KEY = 'invoice_audit_owners';
@@ -66,6 +69,7 @@ async function checkAccess(session, pathname) {
 }
 
 async function isOwner(session) { return (await resolve(session)).owner; }
+async function has(session, permission) { return (await resolve(session)).perms.has(permission); }
 
 // ── Owner-only management ─────────────────────────────────────────────────────
 
@@ -111,5 +115,5 @@ async function revoke(username, permission, actor) {
 
 module.exports = {
   PERMISSIONS, PERMISSION_KEYS, normalize, permissionForPath,
-  ensurePermissions, sessionPermissions, checkAccess, isOwner, listAccess, grant, revoke,
+  ensurePermissions, sessionPermissions, checkAccess, isOwner, has, listAccess, grant, revoke,
 };
