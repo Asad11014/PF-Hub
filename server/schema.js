@@ -361,6 +361,106 @@ async function ensureCoreSchema() {
     await query(`ALTER TABLE ${table_name} ALTER COLUMN ${column_name} TYPE NUMERIC`);
   }
 
+  // ── Invoice detail (Invoice Audit module) ─────────────────────────────────
+  // Mirrors of Mintsoft's per-invoice detail: one row per order line
+  // (/Invoice/{id}/Orders) and one per goods-in / returns / other / collections
+  // line. Fetched once per confirmed invoice, again whenever the invoice changes.
+  await query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS detail_synced_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS detail_source_updated_at TIMESTAMPTZ`);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS invoice_orders (
+      id                     INTEGER PRIMARY KEY,          -- Mintsoft invoice line ID
+      invoice_id             INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      order_id               INTEGER NOT NULL,             -- no FK: billed orders may later be deleted in Mintsoft
+      client_id              INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+      courier_service_id     INTEGER,
+      picking_cost           NUMERIC,
+      extra_picking_cost     NUMERIC,
+      total_picking_cost     NUMERIC,
+      postage_cost           NUMERIC,                      -- charged to the client
+      total_postage_cost     NUMERIC,
+      cost_postage_cost      NUMERIC,                      -- what the courier costs us
+      vat_free_postage_cost  NUMERIC,
+      packaging_cost         NUMERIC,
+      rework_cost            NUMERIC,
+      admin_fee              NUMERIC,
+      total_cost             NUMERIC,
+      number_of_picks        INTEGER,
+      number_of_carton_picks INTEGER,
+      number_of_pallet_picks INTEGER,
+      comments               TEXT,
+      invoice_date           TIMESTAMPTZ,
+      updated_at             TIMESTAMPTZ,
+      synced_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS invoice_orders_invoice_idx ON invoice_orders (invoice_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS invoice_orders_order_idx   ON invoice_orders (order_id)`);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS invoice_extra_lines (
+      kind         TEXT NOT NULL,                 -- goods_in | returns | other | collections
+      id           INTEGER NOT NULL,              -- Mintsoft line ID (unique per kind)
+      invoice_id   INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      client_id    INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+      amount       NUMERIC NOT NULL DEFAULT 0,    -- what the line adds to the invoice
+      item_type    TEXT,                          -- other: Mintsoft item type name
+      charge_type  TEXT,                          -- other: Mintsoft charge type (Admin, Storage, …)
+      reference_id INTEGER,                       -- goods_in: ASN id; returns: return id
+      quantity     NUMERIC,
+      comments     TEXT,
+      invoice_date TIMESTAMPTZ,
+      payload      JSONB,
+      updated_at   TIMESTAMPTZ,
+      synced_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (kind, id)
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS invoice_extra_lines_invoice_idx ON invoice_extra_lines (invoice_id)`);
+
+  // Snapshots, written only when something changed: the client's Mintsoft rate
+  // card (pricing fields of /api/Client/{id}) and its order rules.
+  await query(`
+    CREATE TABLE IF NOT EXISTS client_rate_cards (
+      client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      card        JSONB NOT NULL,
+      card_hash   TEXT NOT NULL,
+      PRIMARY KEY (client_id, captured_at)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS client_order_rules (
+      client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      rules       JSONB NOT NULL,
+      rules_hash  TEXT NOT NULL,
+      PRIMARY KEY (client_id, captured_at)
+    )
+  `);
+
+  // ── Staff permissions (server/permissions.js) ─────────────────────────────
+  await query(`
+    CREATE TABLE IF NOT EXISTS user_permissions (
+      username   TEXT NOT NULL,                   -- Mintsoft login, lower-case
+      permission TEXT NOT NULL,
+      granted_by TEXT,
+      granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (username, permission)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS permission_events (
+      id         SERIAL PRIMARY KEY,
+      at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      actor      TEXT NOT NULL,
+      action     TEXT NOT NULL,                   -- grant | revoke | seed
+      username   TEXT,
+      permission TEXT
+    )
+  `);
+
   // ── Stock by location / batch (BBE and Quarantine reports) ────────────────
   // Mirror of Mintsoft's Products-In-Location report: one row per product ×
   // location × batch × type, keyed by Mintsoft's ProductInLocationId. Replaced

@@ -18,6 +18,8 @@ process.env.PORT = process.env.PORT || '3111';
 require(path.join(ROOT, 'node_modules/dotenv')).config({ path: path.join(ROOT, '.env'), quiet: true });
 
 const ADMIN_KEY = process.env.MINTSOFT_ADMIN_KEY;
+// "__owner__" is a warehouse persona that owns Invoice Audit (QA only).
+process.env.INVOICE_AUDIT_OWNERS = process.env.INVOICE_AUDIT_OWNERS || '__owner__';
 const TEST_CLIENT_ID = parseInt(process.env.TEST_CLIENT_ID || '10');
 if (!ADMIN_KEY) { console.error('[qa] MINTSOFT_ADMIN_KEY missing from .env'); process.exit(1); }
 if (process.env.NODE_ENV === 'production' || process.env.RENDER) {
@@ -68,7 +70,7 @@ https.request = function (options, cb) {
       req.end = () => {
         let u = '';
         try { u = JSON.parse(body).Username; } catch {}
-        if (u === '__wh__')          { persona = 'warehouse'; setImmediate(() => cb(fakeResponse(200, ADMIN_KEY))); }
+        if (u === '__wh__' || u === '__owner__') { persona = 'warehouse'; setImmediate(() => cb(fakeResponse(200, ADMIN_KEY))); }
         else if (u === '__client__') { persona = 'client';    setImmediate(() => cb(fakeResponse(200, ADMIN_KEY))); }
         else { persona = null; setImmediate(() => cb(fakeResponse(401, { Message: 'qa stub: unknown test user' }))); }
       };

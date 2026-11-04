@@ -9,6 +9,8 @@ const fs        = require('fs');
 const auth      = require('./auth');
 const { requireScope } = require('./scope');
 const entitlements = require('./entitlements');
+const permissions  = require('./permissions');
+const audit        = require('./audit');
 const reports   = require('./reports/index');
 const dashboard = require('./reports/dashboard');
 const calendar    = require('./calendar');
@@ -34,6 +36,7 @@ ensureCoreSchema()
   ]))
   .then(() => { if (DEMO_MODE) return seedDemo(); })
   .then(() => entitlements.ensureEntitlements())
+  .then(() => permissions.ensurePermissions())
   .catch(e => console.error('[schema] Bootstrap error:', e.message));
 
 // ── Scheduled sync ────────────────────────────────────────────────────────────
@@ -70,14 +73,19 @@ const server = http.createServer(async (req, res) => {
   try {
     const { pathname } = url;
 
-    // ── Subscription modules ──────────────────────────────────────────────────
-    // Client users need Basic for every data route, plus the add-on a path
-    // belongs to (server/entitlements.js). Warehouse users are never limited.
+    // ── Access gates ──────────────────────────────────────────────────────────
+    // Staff tools need a per-user permission (server/permissions.js), for every
+    // session type. Client users also need Basic for every data route plus the
+    // add-on a path belongs to (server/entitlements.js).
     if (pathname.startsWith('/api/')) {
       const s = auth.getSession(req);
-      if (s && !s.isWarehouse) {
-        const denied = await entitlements.checkAccess(s, pathname);
-        if (denied) return res.json(403, denied);
+      if (s) {
+        const noPermission = await permissions.checkAccess(s, pathname);
+        if (noPermission) return res.json(403, noPermission);
+        if (!s.isWarehouse) {
+          const denied = await entitlements.checkAccess(s, pathname);
+          if (denied) return res.json(403, denied);
+        }
       }
     }
 
@@ -121,6 +129,15 @@ const server = http.createServer(async (req, res) => {
         return res.json(200, await entitlements.setDefaultModules(b.modules, actor));
       }
       return res.json(404, { error: 'Not found' });
+    }
+
+    // ── Invoice Audit (permission 'invoice_audit', enforced above) ────────────
+    if (pathname.startsWith('/api/audit/')) {
+      const session = auth.requireSession(req, res);
+      if (!session) return;
+      if (!session.isWarehouse) return res.json(403, { error: 'Warehouse users only' });
+      try { return await audit.handle(req, res, url, session); }
+      catch (err) { console.error('[audit]', err); return res.json(500, { error: err.message }); }
     }
 
     // ── Report list ───────────────────────────────────────────────────────────

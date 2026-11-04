@@ -6,8 +6,8 @@ The database is a copy of Mintsoft. Mintsoft is the source of truth, and the syn
 
 | Run | When | What it does | Typical cost |
 |---|---|---|---|
-| hourly | every hour at :15 | clients, products changed since the last run, all stock, orders changed since the last run (with items), ASNs changed since the last run (with items), current-month accruals | ~30 API calls, < 1 min |
-| nightly | 02:15 | hourly + reference data (statuses, channels, couriers, warehouses) + invoices dated in the last 120 days | ~35 calls |
+| hourly | every hour at :15 | clients, products changed since the last run, all stock, stock by location/batch, orders changed since the last run (with items), ASNs changed since the last run (with items), current-month accruals | ~35 API calls, < 1 min |
+| nightly | 02:15 | hourly + reference data (statuses, channels, couriers, warehouses) + invoices dated in the last 120 days + **invoice detail** for new or edited invoices + client **rate cards and order rules** (a snapshot when they change) | ~80 calls, plus 5 per new or edited invoice |
 | full | Sundays 03:15, and automatically on the first boot of this engine | everything from scratch; then removes rows Mintsoft has deleted | ~270 calls, ~2 min |
 | reconcile | after the Sunday full | re-reads Mintsoft and compares every column with the database | ~250 calls, ~2 min |
 
@@ -45,3 +45,11 @@ The `clients` row shows more clients in the database than in Mintsoft's list. Th
 - Stock: `qty_on_hand` = Mintsoft `Level` (free stock, what the reports use), `qty_total` = `TotalStockLevel` (physical), `qty_allocated` = the difference.
 - Status names are stored in readable form (`Despatched`, `Invoice Failed`). Mintsoft's own lookup returns codes (`DESPATCHED`).
 - Money and weight columns are unrestricted `NUMERIC`, so values such as a 1.275 discount are kept exactly.
+
+## Invoice detail (Invoice Audit)
+
+- `invoice_orders`: one row per order line of every confirmed invoice (`/api/Accounting/Invoice/{id}/Orders`). `invoice_extra_lines`: goods-in, returns, other and collections lines.
+- Fetched when an invoice is new or its `LastUpdated` changed. Full runs also re-read invoices from the last 100 days. If a boot finds invoices without detail (e.g. the first deploy), it runs the nightly steps straight away.
+- `client_rate_cards` / `client_order_rules`: snapshots of each client's Mintsoft pricing fields and order rules, written only when they change (no contact or address data).
+- Reconcile: `node server/sync/cli.js reconcile invoice_detail` (last 100 days, part of the weekly reconcile) or `invoice_detail_all` (every invoice, ~1,060 calls).
+- Per-order detail only exists once Mintsoft confirms an invoice. The current month has totals only (accruals).

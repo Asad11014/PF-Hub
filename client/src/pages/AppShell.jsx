@@ -41,7 +41,17 @@ import ReturnHistory   from './returns/ReturnHistory'
 import ReturnsHub      from './operations/ReturnsHub'
 import Placeholder     from './Placeholder'
 import Subscriptions   from './admin/Subscriptions'
+import AuditOverview   from './audit/AuditOverview'
+import AuditInvoice    from './audit/AuditInvoice'
+import AuditAccess     from './audit/AuditAccess'
 import { RequireModule, SubscriptionRequired } from '../components/ModuleGate'
+
+// Staff tools: only users holding the permission (checked again on the server).
+function RequirePermission({ permission, children }) {
+  const { session, hasPermission } = useSession()
+  if (session && !hasPermission(permission)) return <Navigate to="/app" replace />
+  return children
+}
 
 function WarehouseOnly({ children }) {
   const { session } = useSession()
@@ -146,6 +156,9 @@ function AppShellLayout() {
           <Route path="shipping-requests" element={<WarehouseOnly><Placeholder title="Shipping Requests" blurb="All shipping form requests from clients (collections, pallets, freight) will appear here to action." icon="🚢" /></WarehouseOnly>} />
           <Route path="extras-requests"   element={<WarehouseOnly><Placeholder title="Requests for Extras" blurb="Client requests for extras — SEO, assembly and one-offs — will appear here." icon="✨" /></WarehouseOnly>} />
           <Route path="admin/subscriptions" element={<WarehouseOnly><Subscriptions /></WarehouseOnly>} />
+          <Route path="audit"             element={<RequirePermission permission="invoice_audit"><AuditOverview /></RequirePermission>} />
+          <Route path="audit/invoice/:id" element={<RequirePermission permission="invoice_audit"><AuditInvoice /></RequirePermission>} />
+          <Route path="audit/access"      element={<RequirePermission permission="invoice_audit"><AuditAccess /></RequirePermission>} />
           <Route path="todo"              element={<WarehouseOnly><Placeholder title="To Do Lists" blurb="Team to-do lists — a future home for warehouse tasks (eventually replacing Trello)." icon="✅" /></WarehouseOnly>} />
 
           {/* Financial */}

@@ -100,6 +100,8 @@ export const CLIENT_NAV = [
 ];
 
 // ── PF Warehouse Hub navigation (warehouse users) ─────────────────────────────
+// Items with `permission` are staff tools shown only to users holding it
+// (server/permissions.js); everyone else does not see them at all.
 // Tools  = operational action tools; Figures = analytical / numbers reports.
 export const WAREHOUSE_NAV = [
   { type: 'link', to: '/app', label: 'Dashboard', icon: '⬛', exact: true },
@@ -133,6 +135,7 @@ export const WAREHOUSE_NAV = [
   { type: 'link', to: '/app/calendar',               label: 'Warehouse Calendar',  icon: '📅' },
   { type: 'link', to: '/app/todo',                   label: 'To Do Lists',         icon: '✅' },
   { type: 'link', to: '/app/admin/subscriptions',    label: 'Client Subscriptions', icon: '🔑' },
+  { type: 'link', to: '/app/audit',                  label: 'Invoice Audit',       icon: '🧾', permission: 'invoice_audit' },
   { type: 'link', to: '/app/help',                   label: 'Help Guides',         icon: '❓' },
 ];
 

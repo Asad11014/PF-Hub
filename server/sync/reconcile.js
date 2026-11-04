@@ -245,6 +245,33 @@ async function reconcile({ apiKey, only = null, log = () => {} } = {}) {
     report.push(t, ti); log(t); log(ti);
   }
 
+  // ── Invoice detail (order lines + goods-in/returns/other/collections lines).
+  // Default: invoices dated in the last 100 days; 'invoice_detail_all' checks every invoice.
+  const allDetail = !!only && only.includes('invoice_detail_all');
+  if (want('invoice_detail') || allDetail) {
+    const to = tally('invoice_orders');
+    const te = tally('invoice_extra_lines');
+    const invs = await query(`SELECT id FROM invoices ${allDetail ? '' : "WHERE invoice_date > NOW() - INTERVAL '100 days'"} ORDER BY id`);
+    const extraCols = E.EXTRA_COLS.filter(c => c !== 'payload');
+    const dropPayload = r => r.filter((_, i) => E.EXTRA_COLS[i] !== 'payload');
+    await E.mapLimit(invs, 4, async ({ id }) => {
+      const d = await E.fetchInvoiceDetail(ctx, id);
+      const dbO = await dbRows(`SELECT * FROM invoice_orders WHERE invoice_id = $1`, [id]);
+      to.api += d.orders.length; to.db += dbO.size;
+      comparePage(to, E.INVOICE_ORDER_COLS, d.orders, dbO, { syncedAt });
+      const seenO = new Set(d.orders.map(r => r[0]));
+      for (const k of dbO.keys()) if (!seenO.has(k)) { to.extraInDb++; sample(to, 'extra', k); }
+      const dbE = await dbRows(`SELECT *, kind || ':' || id AS k FROM invoice_extra_lines WHERE invoice_id = $1`, [id], 'k');
+      const rows = d.extras.map(dropPayload);
+      te.api += rows.length; te.db += dbE.size;
+      comparePage(te, extraCols, rows, dbE, { keyOf: r => `${r[0]}:${r[1]}`, syncedAt });
+      const seenE = new Set(rows.map(r => `${r[0]}:${r[1]}`));
+      for (const k of dbE.keys()) if (!seenE.has(k)) { te.extraInDb++; sample(te, 'extra', k); }
+    });
+    to.invoices = te.invoices = invs.length;
+    report.push(to, te); log(to); log(te);
+  }
+
   // ── Invoices
   if (want('invoices')) {
     const t = tally('invoices');

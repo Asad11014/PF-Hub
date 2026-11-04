@@ -5,7 +5,8 @@
 //
 // Modes (all read-only against Mintsoft; writes go to our database only)
 //   hourly     clients, products (changed), stock, stock batches, orders (changed), ASNs (changed), accruals
-//   nightly    hourly + reference data, invoices (last 120 days)
+//   nightly    hourly + reference data, invoices (last 120 days), invoice detail (new/edited),
+//              client rate cards and order rules (snapshot on change)
 //   full       everything from scratch, then removes records Mintsoft has deleted
 //   reconcile  re-crawls Mintsoft and compares every column with the database
 //
@@ -50,7 +51,14 @@ function stepsFor(mode) {
     { name: 'Orders', cursor: 'orders', run: (ctx, since) => (full ? E.syncOrdersFull(ctx) : E.syncOrdersSince(ctx, since)) },
     { name: 'ASNs', cursor: 'asns', run: (ctx, since) => E.syncAsns(ctx, { since: full ? null : since }) },
   );
-  if (mode !== 'hourly') steps.push({ name: 'Invoices', run: ctx => E.syncInvoices(ctx, { days: full ? null : 120 }) });
+  if (mode !== 'hourly') {
+    steps.push(
+      { name: 'Invoices', run: ctx => E.syncInvoices(ctx, { days: full ? null : 120 }) },
+      // New or edited invoices; full runs also re-read the last 100 days.
+      { name: 'Invoice detail', run: ctx => E.syncInvoiceDetail(ctx, { refreshDays: full ? 100 : null }) },
+      { name: 'Rate cards & rules', run: ctx => E.syncRateCards(ctx) },
+    );
+  }
   steps.push({ name: 'Accruals', run: ctx => E.syncAccruals(ctx) });
   return steps;
 }
@@ -217,6 +225,10 @@ function startScheduler() {
         if (r?.status === 'success') await runReconcile({ triggeredBy: 'boot' });
         return;
       }
+      // Invoices still without their per-order detail (e.g. the first deploy of
+      // Invoice Audit): run the nightly steps now rather than waiting for 02:15.
+      const pending = await queryOne(`SELECT COUNT(*)::int AS n FROM invoices WHERE detail_synced_at IS NULL`);
+      if (pending?.n > 0) return run('nightly', 'boot');
       const last = await queryOne(`SELECT MAX(completed_at) AS t FROM sync_jobs WHERE status IN ('success','partial') AND entity <> 'reconcile'`);
       if (!last?.t || Date.now() - new Date(last.t).getTime() > 70 * 60e3) run('hourly', 'boot');
     } catch (err) { console.error(`[sync] boot catch-up failed: ${err.message}`); }

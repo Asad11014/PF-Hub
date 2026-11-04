@@ -252,6 +252,44 @@ function attachLogging(page, persona) {
     await wh.close(); await cl.close();
   }
 
+  // ── Invoice Audit: owner-only staff permission ────────────────────────────
+  {
+    const own = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const wh  = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const cl  = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await login(own, '__owner__'); await login(wh, '__wh__'); await login(cl, '__client__');
+    const textOf = async (ctx, name, url) => { const p = await ctx.newPage(); await visit(p, name, url); const t = await p.evaluate(() => document.body.innerText).catch(() => ''); await p.close(); return t.toLowerCase(); };
+    const expectIn = (label, text, needle, want = true) => { const has = text.includes(needle.toLowerCase()); results.expectations.push({ label, expected: [want ? `text "${needle}"` : `no "${needle}"`], got: has ? 'present' : 'absent', ok: has === want }); };
+
+    const meO = await api(own, 'OWNER /api/me', '/api/me', {}, { status: [200] });
+    results.expectations.push({ label: 'OWNER holds invoice_audit and is owner', expected: ['yes'], got: meO.body?.isOwner && meO.body?.permissions?.includes('invoice_audit') ? 'yes' : 'no', ok: !!(meO.body?.isOwner && meO.body?.permissions?.includes('invoice_audit')) });
+    const ov = await api(own, 'OWNER audit overview', '/api/audit/overview?from=2026-08&to=2026-10', {}, { status: [200] });
+    await api(own, 'OWNER audit coverage', '/api/audit/coverage?from=2026-08&to=2026-10', {}, { status: [200] });
+    await api(own, 'OWNER audit access panel', '/api/audit/access', {}, { status: [200] });
+    await api(wh, 'WH audit overview without grant', '/api/audit/overview', {}, { status: [403] });
+    await api(wh, 'WH audit invoice without grant', '/api/audit/invoices/337', {}, { status: [403] });
+    expectIn('WH menu hides Invoice Audit without grant', await textOf(wh, 'wh-27-no-audit', '/app'), 'Invoice Audit', false);
+
+    await api(own, 'OWNER grant __wh__', '/api/audit/access', { method: 'POST', data: { username: '__WH__ ' } }, { status: [200] });
+    await api(wh, 'WH audit overview after grant', '/api/audit/overview', {}, { status: [200] });
+    await api(wh, 'WH manage access after grant (owner only)', '/api/audit/access', {}, { status: [403] });
+    await api(wh, 'WH grant others (owner only)', '/api/audit/access', { method: 'POST', data: { username: 'someone@example.com' } }, { status: [403] });
+    expectIn('WH menu shows Invoice Audit after grant', await textOf(wh, 'wh-28-audit-granted', '/app'), 'Invoice Audit');
+
+    await api(own, 'OWNER grant __client__', '/api/audit/access', { method: 'POST', data: { username: '__client__' } }, { status: [200] });
+    await api(cl, 'CLIENT audit overview even with a grant row', '/api/audit/overview', {}, { status: [403] });
+    await api(own, 'OWNER revoke __client__', '/api/audit/access?username=__client__', { method: 'DELETE' }, { status: [200] });
+
+    const invId = (ov.body?.invoices || []).find(i => i.orderLines > 0)?.id || 337;
+    expectIn('OWNER audit overview page', await textOf(own, 'wh-24-audit-overview', '/app/audit'), 'Despatched but never billed');
+    expectIn(`OWNER invoice audit page (#${invId})`, await textOf(own, 'wh-25-audit-invoice', `/app/audit/invoice/${invId}`), 'Invoice totals vs its lines');
+    expectIn('OWNER access page', await textOf(own, 'wh-26-audit-access', '/app/audit/access'), 'Who can see Invoice Audit');
+
+    await api(own, 'OWNER revoke __wh__', '/api/audit/access?username=__wh__', { method: 'DELETE' }, { status: [200] });
+    await api(wh, 'WH audit overview after revoke', '/api/audit/overview', {}, { status: [403] });
+    await own.close(); await wh.close(); await cl.close();
+  }
+
   // ── Unauthenticated ───────────────────────────────────────────────────────
   {
     const ctx = await browser.newContext();
@@ -261,6 +299,7 @@ function attachLogging(page, persona) {
     await api(ctx, 'ANON /api/sync/status', '/api/sync/status', {}, { status: [401] });
     await api(ctx, 'ANON POST /api/sync/reconcile', '/api/sync/reconcile', { method: 'POST' }, { status: [401] });
     await api(ctx, 'ANON GET /api/admin/subscriptions', '/api/admin/subscriptions', {}, { status: [401] });
+    await api(ctx, 'ANON GET /api/audit/overview', '/api/audit/overview', {}, { status: [401] });
     await ctx.close();
   }
 

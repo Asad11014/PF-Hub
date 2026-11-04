@@ -88,10 +88,10 @@ Backfill: about 207 confirmed invoices × 5 detail calls ≈ 1,000 read-only cal
 **Model**: Opus 5.5 (permission boundary, sync semantics).
 **Work**: owner list + `user_permissions` + server check on `/api/audit/*` + `/api/me.permissions`; owner access panel; `invoice_orders` / `invoice_extra_lines` sync (backfill + nightly for new/edited invoices) + reconcile; rate-card and order-rule snapshots; the **Invoice audit** screen showing billed per-order breakdowns, postage margin, credits and coverage checks A1–A4, plus D13 and E15.
 **DoD**
-- [ ] Only the owner sees the module; a granted warehouse user sees it within a minute; a revoked one loses it; a client user gets 403 even with a grant row (harness).
-- [ ] Reconcile: `invoice_orders` and `invoice_extra_lines` 0 missing / extra / drift for all confirmed invoices.
-- [ ] For three sampled invoices, the sum of the lines equals the invoice header (or the difference is shown and explained).
-- [ ] Coverage report for the last 3 closed months: unbilled / double-billed / cancelled-billed counts, with order numbers.
+- [x] Only the owner sees the module; a granted warehouse user sees it within a minute; a revoked one loses it; a client user gets 403 even with a grant row (harness).
+- [x] Reconcile: `invoice_orders` and `invoice_extra_lines` 0 missing / extra / drift for all confirmed invoices.
+- [x] For three sampled invoices, the sum of the lines equals the invoice header (or the difference is shown and explained).
+- [x] Coverage report for the last 3 closed months: unbilled / double-billed / cancelled-billed counts, with order numbers.
 
 ### I2 — Rate-card and rules engine
 **Model**: Opus 5.5 (rule semantics).
@@ -115,3 +115,19 @@ Backfill: about 207 confirmed invoices × 5 detail calls ≈ 1,000 read-only cal
 - A difference of **£0.01** or less is treated as rounding.
 - Findings are internal and never shown to client users.
 - Rework item prices are **inferred, then confirmed** by the owner before they drive "missing / extra rework" flags.
+
+## Stage log
+
+| Stage | Date | Branch | Model | Evidence |
+|---|---|---|---|---|
+| I1 | 2026-11-04 | `v3/i1-invoice-audit` | Opus 5.5 | Backfill 212 invoices → 17,570 order lines + 1,666 other lines in 25–27 s (1,060 calls); reconcile `invoice_detail_all`: 0 missing / extra / drift on every line and all 212 invoice headers; integrity 211/212 invoices equal their lines to the penny (all since Jul 2025; the exception is a Feb 2025 "bulk adjustment" at −£0.02 rounding over 139 goods-in lines); coverage Aug–Oct 2026: 0 unbilled, 0 double-billed, 0 billed while cancelled/undespatched, 20 zero-charge or noted lines; `npm test` 18/18; harness 72/72 (22 new access checks) |
+
+I1 notes: how Mintsoft builds an invoice (worked out from the data, not documented by Mintsoft)
+- Order-line fields sum into their categories: picking = Σ `TotalPickingCost` (incl. extra picking), postage = Σ `PostageCost`, rework, packaging, admin, VAT-free postage likewise.
+- Goods-in line = `TotalUnitCost + AdminCost + DeliverySizeCost × Quantity + TotalPerSkuCost`. The first version missed the quantity multiplier, which matched only 53 of 144 invoices with goods-in.
+- An "Other" line adds to the category of its charge type (Picking, Postage, Rework, Packaging, GoodsIn, Returns, Storage). Only Admin and Generic types count as "other items". Treating every "Other" line as other items broke 62 invoices.
+- Storage is only partly itemised (Storage-type Other lines). Daily storage charges are not listed, so storage is shown and never counted as a mismatch.
+- Mintsoft no longer holds order and return lines for some invoices from before Jul 2025 (32 without order lines, plus 13 returns-only gaps for deleted clients 5, 9, 11). Those categories show as "not available" on old invoices only; on newer invoices a charge without lines is a real difference.
+- Order-line `Comments` lists the rework items charged ("<item>- X <qty>", the name can be blank). Other lines are typed notes: 41 across all invoices, e.g. "Zerod All Costs", "Short Shipped …". One rework item is literally named "pricing need adding" (for I2's price review).
+- `CostPostageCost` is 0 when Mintsoft does not know the courier cost (most APC Next Day, all pallet services, many FedEx). Margin is calculated only where it is known, and the rest are counted (462 orders Aug–Oct).
+- A line's `InvoiceDate` is 2.5–9.5 h after despatch. Orders despatched within 12 h of a client's latest billing run count as "awaiting next invoice", not unbilled. On 4 Nov 2026, October was not yet invoiced for 14 clients.

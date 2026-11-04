@@ -151,8 +151,9 @@ function flattenRoutes(node) {
 
 // A single client-nav node — either a leaf link or a (possibly nested) group.
 function NavNode({ node, closeSidebar, depth }) {
-  const { hasModule } = useSession()
+  const { hasModule, hasPermission } = useSession()
   if (node.items) return <CollapsibleGroup group={node} closeSidebar={closeSidebar} depth={depth} />
+  if (node.permission && !hasPermission(node.permission)) return null
   const locked = node.module && !hasModule(node.module)
   return (
     <NavLink
@@ -217,8 +218,10 @@ function CollapsibleGroup({ group, closeSidebar, depth = 0, open: openProp, onTo
 
 // Flat links + collapsible groups with accordion behaviour (one group open at a
 // time). Used for both the Client Hub and Warehouse Hub menus.
-function AccordionNav({ nav, closeSidebar }) {
+function AccordionNav({ nav: fullNav, closeSidebar }) {
   const location = useLocation()
+  const { hasPermission } = useSession()
+  const nav = fullNav.filter(e => !e.permission || hasPermission(e.permission))
   const [openId, setOpenId] = useState(() => {
     const g = nav.find(e => e.type === 'group' && e.items.some(i => location.pathname.startsWith(i.to)))
     return g?.id || null

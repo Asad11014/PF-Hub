@@ -4,6 +4,7 @@
 // foreign keys first (unknown clients / products are fetched by id), writes a
 // page at a time inside a transaction, and returns { fetched, upserted, deleted, note }.
 
+const crypto = require('crypto');
 const { query } = require('../db');
 const { tx, bulkUpsert, bulkInsert } = require('./store');
 const { parseMintsoftDate: ts, toMintsoftParam, londonParts } = require('./time');
@@ -448,6 +449,144 @@ async function syncInvoices(ctx, { days = null } = {}) {
   return out;
 }
 
+// ── Invoice detail (Invoice Audit) ────────────────────────────────────────────
+// Per confirmed invoice: every order line (/Orders) and every goods-in, returns,
+// other and collections line, fetched when the invoice is new or Mintsoft's
+// LastUpdated for it changed (invoices are edited after month end). How lines
+// add up to the invoice header (verified across all 212 invoices, see
+// server/audit.js): order-line fields sum into their categories; a goods-in
+// line is TotalUnitCost + AdminCost + DeliverySizeCost × Quantity +
+// TotalPerSkuCost; an "Other" line adds to the category of its charge type
+// (Admin and Generic → generic items); storage is only partly itemised.
+
+async function mapLimit(items, limit, fn) {
+  const queue = [...items];
+  await Promise.all(Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length) await fn(queue.shift());
+  }));
+}
+
+const INVOICE_ORDER_COLS = [
+  'id', 'invoice_id', 'order_id', 'client_id', 'courier_service_id', 'picking_cost', 'extra_picking_cost', 'total_picking_cost',
+  'postage_cost', 'total_postage_cost', 'cost_postage_cost', 'vat_free_postage_cost', 'packaging_cost', 'rework_cost',
+  'admin_fee', 'total_cost', 'number_of_picks', 'number_of_carton_picks', 'number_of_pallet_picks', 'comments',
+  'invoice_date', 'updated_at',
+];
+const mapInvoiceOrder = (l, invoiceId) => [
+  l.ID, invoiceId, int(l.OrderId), idOf(l.ClientId), idOf(l.CourierServiceId),
+  num(l.PickingCost), num(l.ExtraPickingCost), num(l.TotalPickingCost),
+  num(l.PostageCost), num(l.TotalPostageCost), num(l.CostPostageCost), num(l.VatFreePostageCost),
+  num(l.PackagingCost), num(l.ReworkCost), num(l.AdminFee), num(l.TotalCost),
+  int(l.NumberOfPicks), int(l.NumberOfCartonPicks), int(l.NumberOfPalletPicks),
+  str(l.Comments), ts(l.InvoiceDate), ts(l.LastUpdated),
+];
+
+const round4 = v => Math.round(v * 10000) / 10000;
+const EXTRA_KINDS = {
+  goods_in: { path: 'GoodsIn', map: l => ({
+    amount: round4((num(l.TotalUnitCost) ?? 0) + (num(l.AdminCost) ?? 0) + (num(l.DeliverySizeCost) ?? 0) * (num(l.Quantity) ?? 1) + (num(l.TotalPerSkuCost) ?? 0)),
+    itemType: 'Goods in', ref: idOf(l.ASNId), qty: num(l.NumberOfUnits), comments: str(l.Note) }) },
+  returns: { path: 'Returns', map: l => ({ amount: num(l.Cost) ?? num(l.TotalCost) ?? 0, itemType: 'Return', ref: idOf(l.ReturnId), comments: str(l.Comments) }) },
+  other: { path: 'Other', map: l => ({
+    amount: num(l.Cost) ?? 0, itemType: str(l.InvoiceItemType?.Name), chargeType: str(l.InvoiceItemType?.ChargeType), comments: str(l.Comments) }) },
+  collections: { path: 'Collections', map: l => ({ amount: num(l.Cost) ?? num(l.TotalCost) ?? 0, itemType: 'Collection', comments: str(l.Comments) }) },
+};
+const EXTRA_COLS = ['kind', 'id', 'invoice_id', 'client_id', 'amount', 'item_type', 'charge_type', 'reference_id', 'quantity', 'comments', 'invoice_date', 'payload', 'updated_at'];
+function mapExtra(kind, l, invoiceId) {
+  const m = EXTRA_KINDS[kind].map(l);
+  return [kind, l.ID, invoiceId, idOf(l.ClientId), m.amount, m.itemType ?? null, m.chargeType ?? null, m.ref ?? null,
+    m.qty ?? null, m.comments ?? null, ts(l.InvoiceDate), JSON.stringify(l), ts(l.LastUpdated)];
+}
+
+async function fetchInvoiceDetail(ctx, invoiceId) {
+  const kinds = Object.keys(EXTRA_KINDS);
+  const [orders, ...extras] = await Promise.all([
+    ctx.get(`/api/Accounting/Invoice/${invoiceId}/Orders`),
+    ...kinds.map(k => ctx.get(`/api/Accounting/Invoice/${invoiceId}/${EXTRA_KINDS[k].path}`)),
+  ]);
+  return {
+    orders: (Array.isArray(orders) ? orders : []).filter(l => l.ID).map(l => mapInvoiceOrder(l, invoiceId)),
+    extras: kinds.flatMap((k, i) => (Array.isArray(extras[i]) ? extras[i] : []).filter(l => l.ID).map(l => mapExtra(k, l, invoiceId))),
+  };
+}
+
+// refreshDays: also re-read invoices dated within that many days (full runs).
+async function syncInvoiceDetail(ctx, { refreshDays = null } = {}) {
+  const due = await query(
+    `SELECT id, client_id FROM invoices
+     WHERE detail_synced_at IS NULL OR detail_source_updated_at IS DISTINCT FROM updated_at
+        ${refreshDays ? `OR invoice_date > NOW() - make_interval(days => ${Number(refreshDays)})` : ''}
+     ORDER BY invoice_date DESC NULLS LAST`
+  );
+  let lines = 0;
+  const failed = [];
+  await mapLimit(due, 4, async inv => {
+    try {
+      const d = await fetchInvoiceDetail(ctx, inv.id);
+      await ensureClients(ctx, [inv.client_id, ...d.orders.map(r => r[3]), ...d.extras.map(r => r[3])]);
+      await tx(async db => {
+        await db.query(`DELETE FROM invoice_orders WHERE invoice_id = $1 AND NOT (id = ANY($2::int[]))`, [inv.id, d.orders.map(r => r[0])]);
+        await bulkUpsert(db, 'invoice_orders', INVOICE_ORDER_COLS, d.orders, { nowCol: 'synced_at' });
+        for (const kind of Object.keys(EXTRA_KINDS)) {
+          await db.query(`DELETE FROM invoice_extra_lines WHERE invoice_id = $1 AND kind = $2 AND NOT (id = ANY($3::int[]))`,
+            [inv.id, kind, d.extras.filter(r => r[0] === kind).map(r => r[1])]);
+        }
+        await bulkUpsert(db, 'invoice_extra_lines', EXTRA_COLS, d.extras, { conflict: ['kind', 'id'], nowCol: 'synced_at' });
+        await db.query(`UPDATE invoices SET detail_synced_at = NOW(), detail_source_updated_at = updated_at WHERE id = $1`, [inv.id]);
+      });
+      lines += d.orders.length + d.extras.length;
+    } catch (err) {
+      failed.push(`${inv.id} (${err.status || err.code || String(err.message).slice(0, 60)})`);
+    }
+  });
+  if (due.length && failed.length === due.length) throw new Error(`invoice detail failed for every invoice: ${failed.slice(0, 3).join(', ')}`);
+  return { fetched: due.length, upserted: lines, note: failed.length ? `failed for invoices ${failed.join(', ')}` : undefined };
+}
+
+// ── Rate cards and order rules (snapshots for the audit) ──────────────────────
+// Rate card = the pricing fields of /api/Client/{id} (contact and address
+// fields are never stored). A new snapshot is written only when it changes.
+
+const RATE_CARD_TEXT = new Set(['PickingCalculationType', 'TieredPricingInvoiceFrequency', 'VolumetricStorageFrequency', 'StorageType']);
+const RATE_CARD_SKIP = new Set(['ID', 'CountryId', 'CountryOfManufactureId', 'CurrencyId']);
+function rateCard(c) {
+  const card = {};
+  for (const [k, v] of Object.entries(c || {})) {
+    if (RATE_CARD_SKIP.has(k)) continue;
+    if (typeof v === 'number' || typeof v === 'boolean' || (RATE_CARD_TEXT.has(k) && typeof v === 'string')) card[k] = v;
+  }
+  return card;
+}
+const stable = v => (Array.isArray(v) ? `[${v.map(stable).join(',')}]`
+  : v && typeof v === 'object' ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stable(v[k])}`).join(',')}}`
+  : JSON.stringify(v));
+const hashOf = v => crypto.createHash('sha1').update(stable(v)).digest('hex');
+
+async function syncRateCards(ctx) {
+  const clients = await query(`SELECT id FROM clients ORDER BY id`);
+  const latest = async (table, col) => new Map((await query(
+    `SELECT DISTINCT ON (client_id) client_id, ${col} AS h FROM ${table} ORDER BY client_id, captured_at DESC`)).map(r => [r.client_id, r.h]));
+  const [cardHash, rulesHash] = await Promise.all([latest('client_rate_cards', 'card_hash'), latest('client_order_rules', 'rules_hash')]);
+  let cards = 0, rules = 0;
+  const noRecord = [];
+  await mapLimit(clients, 4, async ({ id }) => {
+    let c = null;
+    try { c = await ctx.get(`/api/Client/${id}`); } catch (err) { if (err.status !== 404) throw err; }
+    if (!c || !c.ID) { noRecord.push(id); return; }
+    const card = rateCard(c);
+    const h = hashOf(card);
+    if (cardHash.get(id) !== h) { await query(`INSERT INTO client_rate_cards (client_id, card, card_hash) VALUES ($1, $2, $3)`, [id, JSON.stringify(card), h]); cards++; }
+    const list = await ctx.get(`/api/OrderRules?clientId=${id}`);
+    const set = Array.isArray(list) ? list : [];
+    const rh = hashOf(set);
+    if (rulesHash.get(id) !== rh) { await query(`INSERT INTO client_order_rules (client_id, rules, rules_hash) VALUES ($1, $2, $3)`, [id, JSON.stringify(set), rh]); rules++; }
+  });
+  return {
+    fetched: clients.length - noRecord.length, upserted: cards + rules,
+    note: `${cards} rate-card and ${rules} rule-set change(s)${noRecord.length ? `; no Mintsoft record for clients ${noRecord.join(',')}` : ''}`,
+  };
+}
+
 // ── Accruals (current month, unconfirmed charges per client) ──────────────────
 // Rows are keyed by month, so earlier months keep their final snapshot.
 
@@ -471,6 +610,7 @@ async function syncAccruals(ctx) {
 
 module.exports = {
   syncReference, syncClients, syncProducts, syncStock, syncStockBatches, syncOrdersSince, syncOrdersFull, syncAsns, syncInvoices, syncAccruals,
+  syncInvoiceDetail, syncRateCards, fetchInvoiceDetail, INVOICE_ORDER_COLS, EXTRA_COLS, rateCard, hashOf, mapLimit,
   // exported for the reconcile tool and tests
   ORDER_COLS, ASN_COLS, BATCH_COLS, batchLookups, ukDate, mapClient, mapProduct, mapStock, mapOrder, mapOrderItem, mapAsn, mapAsnItem, mapInvoice, costs,
   str, num, int, bool, idOf,

@@ -33,6 +33,12 @@ SELECT to_char(date_trunc('month', invoice_date),'YYYY-MM') AS month, COUNT(*) A
        ROUND(SUM(picking_cost+postage_cost+vat_free_postage_cost+storage_cost+goods_in_cost+returns_cost+rework_cost+packaging_cost+generic_items_cost+collections_cost+admin_fee),2) AS total
 FROM invoices GROUP BY 1 ORDER BY 1 DESC LIMIT 18;
 
+\echo '=== invoice detail (Invoice Audit) ==='
+SELECT COUNT(*) AS invoices, COUNT(detail_synced_at) AS with_detail, MAX(detail_synced_at) AS last_detail_sync FROM invoices;
+SELECT (SELECT COUNT(*) FROM invoice_orders) AS order_lines, (SELECT COUNT(*) FROM invoice_extra_lines) AS other_lines,
+       (SELECT COUNT(DISTINCT client_id) FROM client_rate_cards) AS rate_cards, (SELECT COUNT(DISTINCT client_id) FROM client_order_rules) AS rule_sets,
+       (SELECT COUNT(*) FROM user_permissions) AS staff_grants;
+
 \echo '=== accruals ==='
 SELECT client_id, period_month, updated_at FROM invoice_accruals ORDER BY period_month DESC, client_id LIMIT 20;
 

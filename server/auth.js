@@ -7,6 +7,7 @@ const { mintsoftGet } = require('./mintsoft');
 const { runIncrementalSync } = require('./sync');
 const { queryOne } = require('./db');
 const entitlements = require('./entitlements');
+const permissions  = require('./permissions');
 const { DEMO_WAREHOUSE, DEMO_CLIENTS } = require('./demo/constants');
 
 // In-memory session store: { sessionToken: { apiKey, clientId, username, ... } }
@@ -380,11 +381,13 @@ function logout(req, res) {
 // decides what the menu shows as available or locked.
 async function moduleInfo(session) {
   try {
-    const [modules, moduleCatalog] = await Promise.all([entitlements.sessionModules(session), entitlements.catalog()]);
-    return { modules, moduleCatalog };
+    const [modules, moduleCatalog, perms] = await Promise.all([
+      entitlements.sessionModules(session), entitlements.catalog(), permissions.sessionPermissions(session),
+    ]);
+    return { modules, moduleCatalog, permissions: perms.permissions, isOwner: perms.isOwner };
   } catch (err) {
     console.error('[entitlements] moduleInfo failed:', err.message);
-    return { modules: session?.isWarehouse ? [...entitlements.MODULE_KEYS] : [], moduleCatalog: [] };
+    return { modules: session?.isWarehouse ? [...entitlements.MODULE_KEYS] : [], moduleCatalog: [], permissions: [], isOwner: false };
   }
 }
 
