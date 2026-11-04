@@ -52,3 +52,18 @@ body {
   font-family: 'DM Mono', monospace !important;
   font-size: 12px !important;
 }
+
+/* ── Print ───────────────────────────────────────────────────────────────────
+   The app shell is a fixed-height screen with scrolling panes. For printing,
+   let everything flow at full height so long pages continue onto page 2+,
+   hide the navigation chrome, repeat table headers and keep rows whole. */
+@media print {
+  @page { size: A4; margin: 12mm; }
+  html, body, #root { height: auto !important; overflow: visible !important; background: #fff !important; }
+  .h-screen, .h-full { height: auto !important; }
+  .overflow-hidden, .overflow-y-auto, .overflow-x-hidden, .overflow-x-auto { overflow: visible !important; }
+  .sticky { position: static !important; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; page-break-inside: avoid; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}

@@ -22,22 +22,23 @@ async function createContext({ apiKey, onPage = () => {} }) {
   }
 
   // Walk every page of a list endpoint; onBatch(rows) is awaited per page.
-  async function pages(path, onBatch) {
+  // size: page size where an endpoint allows more than 100 (e.g. reports).
+  async function pages(path, onBatch, { size = PAGE } = {}) {
     const sep = path.includes('?') ? '&' : '?';
     let total = 0;
     let prevFirst = null;
     for (let page = 1; page <= 2000; page++) {
-      const body = await get(`${path}${sep}Limit=${PAGE}&PageNo=${page}`);
+      const body = await get(`${path}${sep}Limit=${size}&PageNo=${page}`);
       const batch = Array.isArray(body) ? body : [];
       if (!batch.length) break;
       // Some endpoints ignore paging and return the same rows forever.
-      const first = batch[0]?.ID ?? null;
+      const first = batch[0]?.ID ?? batch[0]?.ProductInLocationId ?? null;
       if (first !== null && first === prevFirst) throw new Error(`${path.split('?')[0]} repeated page ${page - 1}; paging not honoured`);
       prevFirst = first;
       await onBatch(batch);
       total += batch.length;
       await onPage();
-      if (batch.length < PAGE) break;
+      if (batch.length < size) break;
     }
     return total;
   }

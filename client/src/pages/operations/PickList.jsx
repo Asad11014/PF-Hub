@@ -65,7 +65,7 @@ export default function PickList() {
   const order = data?.order
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div className="flex-1 overflow-y-auto print:overflow-visible">
       <header className="bg-brand-surface border-b border-brand-border px-4 sm:px-7 min-h-[52px] flex items-center justify-between sticky top-0 z-40 gap-2 print:hidden">
         <div>
           <div className="font-sans font-bold text-[15px] text-ink">Pick List</div>
@@ -87,7 +87,7 @@ export default function PickList() {
         )}
       </header>
 
-      <div className="p-4 sm:p-7 space-y-5">
+      <div className="p-4 sm:p-7 space-y-5 print:p-0">
         {/* Search */}
         <form onSubmit={run} className="bg-brand-surface border border-brand-border rounded-lg px-4 sm:px-6 py-3 sm:py-4 print:hidden">
           <div className="font-mono text-[9px] text-primary uppercase tracking-widest mb-3">▸ Order Lookup</div>
@@ -126,7 +126,15 @@ export default function PickList() {
             {/* Pick lines */}
             <table className="w-full text-left">
               <thead>
+                {/* Repeats at the top of every printed page */}
+                <tr className="hidden print:table-row">
+                  <th colSpan={6} className="px-4 pt-1 pb-2 text-left font-mono text-[10px] text-ink-muted">
+                    Pick list · Order <span className="font-bold text-ink">{order.orderNumber}</span>
+                    {' · '}{order.clientName || `Client #${order.clientId}`} · {order.itemCount} lines · {order.totalUnits} units
+                  </th>
+                </tr>
                 <tr className="border-b border-brand-border">
+                  <th className="hidden print:table-cell w-8 px-2 py-3 font-mono text-[9px] text-ink-dim uppercase">✓</th>
                   <Th>Location(s)</Th>
                   <Th>SKU</Th>
                   <Th>Product</Th>
@@ -140,7 +148,8 @@ export default function PickList() {
                   const short   = !noStock && l.totalAvailable < l.qtyRequired
                   return (
                     <tr key={i} className="border-b border-brand-border last:border-0 align-top">
-                      <td className="px-4 py-3">
+                      <td className="hidden print:table-cell px-2 py-3 print:py-1.5"><span className="inline-block w-4 h-4 border border-ink rounded-sm" /></td>
+                      <td className="px-4 py-3 print:py-1.5">
                         {l.locations.length === 0 ? (
                           <span className="font-mono text-xs text-danger font-semibold">NO LOCATION</span>
                         ) : (
@@ -155,10 +164,10 @@ export default function PickList() {
                           </div>
                         )}
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs text-ink">{l.sku}</td>
-                      <td className="px-4 py-3 text-sm text-ink">{l.name || '—'}</td>
-                      <td className="px-4 py-3 text-right font-mono text-sm font-bold text-ink">{l.qtyRequired}</td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-4 py-3 print:py-1.5 font-mono text-xs text-ink">{l.sku}</td>
+                      <td className="px-4 py-3 print:py-1.5 text-sm print:text-xs print:leading-snug text-ink">{l.name || '—'}</td>
+                      <td className="px-4 py-3 print:py-1.5 text-right font-mono text-sm font-bold text-ink">{l.qtyRequired}</td>
+                      <td className="px-4 py-3 print:py-1.5 text-right">
                         <span className={`font-mono text-xs font-semibold ${noStock ? 'text-danger' : short ? 'text-warning' : 'text-success'}`}>
                           {l.totalAvailable}
                         </span>

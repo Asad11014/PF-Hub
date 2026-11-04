@@ -24,6 +24,9 @@ FROM orders o GROUP BY 1 ORDER BY 1 DESC LIMIT 30;
 \echo '=== products / stock ==='
 SELECT COUNT(*) AS products, COUNT(client_id) AS with_client, COUNT(*) FILTER (WHERE bundle) AS bundles, COUNT(*) FILTER (WHERE discontinued) AS discontinued, MAX(synced_at) FROM products;
 SELECT COUNT(*) AS stock_rows, COUNT(DISTINCT client_id) AS clients, SUM(qty_on_hand) AS on_hand, MAX(updated_at) FROM product_stock_levels;
+SELECT COUNT(*) AS batch_rows, COUNT(*) FILTER (WHERE best_before IS NOT NULL) AS with_best_before,
+       SUM(quantity) FILTER (WHERE line_type = 'Quarantine' OR upper(location_type) = 'QUARANTINE') AS quarantine_units,
+       COUNT(*) FILTER (WHERE client_id IS NULL) AS unmapped_client, MAX(synced_at) FROM stock_batches;
 
 \echo '=== invoices per month (incl. unlinked clients) ==='
 SELECT to_char(date_trunc('month', invoice_date),'YYYY-MM') AS month, COUNT(*) AS invoices, COUNT(*) FILTER (WHERE client_id IS NULL) AS null_client,

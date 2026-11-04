@@ -103,8 +103,11 @@ function HubOverview() {
         <div className="space-y-2 pt-1">
           <Page name="Reports">A library of focused reports — Health Score, Live Snapshot, Aging Report, SKU Velocity, Cost Breakdown, Best Sellers and Sales Trend. Open any one to dig into the detail.</Page>
           <Page name="Product Overview">A full table of your products with on-hand stock, type, supplier and category. Filter by category or supplier, hide zero-stock or bundles, and show discontinued lines.</Page>
-          <Page name="Inventory Planner">Demand forecasting and reorder planning. (Coming soon.)</Page>
-          <Page name="Excess Stock">Surfaces slow-moving and overstocked SKUs so you can free up tied-up capital. (Coming soon.)</Page>
+          <Page name="Inventory Planner">Demand forecasts, reorder points and purchase suggestions for every SKU. (Add-on.)</Page>
+          <Page name="Excess Stock">Surfaces slow-moving and overstocked SKUs so you can free up tied-up capital.</Page>
+          <Page name="BBE Report">Every batch of your stock that has a best-before / expiry date, grouped into Expired, under 30 days, 30–60, 60–90 and 90+ days, with its location. Set your own warning window and export to CSV. (Add-on.)</Page>
+          <Page name="Quarantine Report">All of your stock held in quarantine, whether it has quarantine status or sits in a quarantine location, with batch, location, quantity and value at cost. (Add-on.)</Page>
+          <p className="text-xs">Items marked add-on are optional modules. If one shows a 🔒 in your menu, contact your account manager to add it.</p>
         </div>
       </Section>
 

@@ -31,6 +31,8 @@ import ProductOverview from './stock/ProductOverview'
 import InventoryPlanner from './stock/InventoryPlanner'
 import ExcessStock     from './stock/ExcessStock'
 import StorageCalculator from './invoice/StorageCalculator'
+import BbeReport       from './stock/BbeReport'
+import QuarantineReport from './stock/QuarantineReport'
 import SeoPage         from './SeoPage'
 import HelpGuides      from './help/HelpGuides'
 import HelpGuideView   from './help/HelpGuideView'
@@ -90,10 +92,10 @@ function AppShellLayout() {
   if (!session.isWarehouse && session.clientId && !hasModule('core')) return <SubscriptionRequired />
 
   return (
-    <div className="h-screen flex flex-col bg-brand-bg overflow-hidden">
+    <div className="h-screen flex flex-col bg-brand-bg overflow-hidden print:block print:bg-white">
 
       {/* Full-width top header — spans the entire page */}
-      <header className="flex-shrink-0 h-16 bg-white flex items-center justify-between px-4 sm:px-6 z-50">
+      <header className="flex-shrink-0 h-16 bg-white flex items-center justify-between px-4 sm:px-6 z-50 print:hidden">
         <div className="flex items-center gap-3 min-w-0">
           <button onClick={() => (sidebarOpen ? closeSidebar() : openSidebar())} aria-label="Toggle menu"
             className="lg:hidden w-8 h-8 flex items-center justify-center text-navy hover:bg-brand-surface2 rounded transition-colors flex-shrink-0">
@@ -114,7 +116,7 @@ function AppShellLayout() {
       </header>
 
       {/* Body: sidebar + main content */}
-      <div className="flex-1 min-h-0 relative">
+      <div className="flex-1 min-h-0 relative print:block">
 
         {sidebarOpen && (
           <div className="fixed inset-x-0 bottom-0 top-16 bg-black/40 z-30 lg:hidden" onClick={closeSidebar} />
@@ -122,7 +124,7 @@ function AppShellLayout() {
 
         <Sidebar />
 
-        <main className="h-full lg:ml-60 flex flex-col min-w-0 overflow-x-hidden">
+        <main className="h-full lg:ml-60 print:ml-0 print:block flex flex-col min-w-0 overflow-x-hidden">
         {session.demo && <DemoBanner />}
         <Routes>
           <Route index element={<Dashboard />} />
@@ -158,8 +160,8 @@ function AppShellLayout() {
           <Route path="stock/reports"           element={<ReportsIndex />} />
           <Route path="stock/product-overview"  element={<ProductOverview />} />
           <Route path="stock/inventory-planner" element={<RequireModule module="forecasting" title="Inventory Planner"><InventoryPlanner /></RequireModule>} />
-          <Route path="stock/bbe"               element={<RequireModule module="bbe" title="BBE Report"><Placeholder title="BBE Report" blurb="Stock approaching its best-before / expiry date, by batch and location." icon="⏰" /></RequireModule>} />
-          <Route path="stock/quarantine"        element={<RequireModule module="quarantine" title="Quarantine Report"><Placeholder title="Quarantine Report" blurb="Every unit of your stock currently held in quarantine, by batch and location." icon="🚫" /></RequireModule>} />
+          <Route path="stock/bbe"               element={<RequireModule module="bbe" title="BBE Report"><BbeReport /></RequireModule>} />
+          <Route path="stock/quarantine"        element={<RequireModule module="quarantine" title="Quarantine Report"><QuarantineReport /></RequireModule>} />
           <Route path="stock/excess"            element={<ExcessStock />} />
 
           {/* Returns */}

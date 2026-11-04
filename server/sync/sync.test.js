@@ -66,6 +66,19 @@ test('ASN mapper uses booked quantity and readable status', () => {
   assert.deepEqual(E.mapAsnItem({ ProductId: 4173, SKU: 'S', QuantityExpected: 700, QuantityReceieved: 650, QuantityBooked: 640 }, 5, ctx).slice(0, 5), [5, 4173, 'S', 700, 640]);
 });
 
+test('UK report dates (dd/MM/yyyy) parse to ISO dates; blanks and impossible dates are null', () => {
+  assert.equal(E.ukDate('31/07/2027'), '2027-07-31');
+  assert.equal(E.ukDate('01/12/2029 00:00:00'), '2029-12-01');  // Products-In-Location report format
+  assert.equal(E.ukDate('29/02/2028 13:05'), '2028-02-29');
+  assert.equal(E.ukDate('1/2/2028'), '2028-02-01');
+  assert.equal(E.ukDate('29/02/2028'), '2028-02-29');   // leap year
+  assert.equal(E.ukDate('29/02/2027'), null);           // not a date
+  assert.equal(E.ukDate('31/04/2027'), null);
+  assert.equal(E.ukDate(''), null);
+  assert.equal(E.ukDate(null), null);
+  assert.equal(E.ukDate('2027-07-31'), null);           // not the report's format
+});
+
 test('reconcile normaliser compares database and API representations', () => {
   assert.equal(norm('12.50'), norm(12.5));
   assert.equal(norm(new Date('2026-09-20T11:44:00Z')), norm('2026-09-20T11:44:00.000Z'));

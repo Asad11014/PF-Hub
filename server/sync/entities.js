@@ -276,6 +276,72 @@ async function syncStock(ctx) {
   return { fetched, upserted, deleted, note: notes.join('; ') || undefined };
 }
 
+// ── Stock by location / batch (Products-In-Location report) ───────────────────
+// Feeds the BBE and Quarantine reports. Rows carry the client's short name and
+// the SKU, which map to our client and product ids (both unique). Replaced in
+// full per warehouse, like stock levels.
+
+// Mintsoft report dates are UK dd/MM/yyyy, optionally with a time
+// ("01/12/2029 00:00:00") → 'YYYY-MM-DD' (null when blank/invalid).
+function ukDate(v) {
+  const m = String(v ?? '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  if (!m) return null;
+  const [, d, mo, y] = m;
+  const iso = `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  const dt = new Date(`${iso}T00:00:00Z`);
+  return isNaN(dt) || dt.getUTCDate() !== +d || dt.getUTCMonth() + 1 !== +mo ? null : iso;
+}
+
+const BATCH_COLS = [
+  'id', 'warehouse_id', 'client_id', 'product_id', 'sku', 'product_name', 'location', 'location_type', 'line_type',
+  'batch_no', 'serial_no', 'best_before', 'quantity', 'allocated_order', 'carton_code', 'pallet_code', 'updated_at',
+];
+const mapBatch = (r, whId, clientId, productId) => [
+  r.ProductInLocationId, whId, clientId, productId, str(r.ProductSKU) || '', str(r.ProductName), str(r.Location),
+  str(r.LocationType), str(r.Type), str(r.BatchNo), str(r.SerialNo), ukDate(r.BestBefore), int(r.Quantity) ?? 0,
+  str(r.AllocatedOrder), str(r.CartonCode), str(r.PalletCode), ts(r.LastUpdated),
+];
+
+// Lookups used by the batch sync and its reconcile: client short name → id, (client, SKU) → product id.
+async function batchLookups() {
+  const [clients, products] = await Promise.all([
+    query(`SELECT id, upper(short_name) AS sn FROM clients WHERE short_name IS NOT NULL`),
+    query(`SELECT id, client_id, sku FROM products`),
+  ]);
+  const clientByShort = new Map(clients.map(c => [c.sn, c.id]));
+  const productByKey = new Map(products.map(p => [`${p.client_id}|${p.sku}`, p.id]));
+  return {
+    map(r, whId) {
+      const clientId = clientByShort.get(String(r.Client || '').toUpperCase()) ?? null;
+      const productId = clientId ? productByKey.get(`${clientId}|${r.ProductSKU}`) ?? null : null;
+      return { clientId, row: mapBatch(r, whId, clientId, productId) };
+    },
+  };
+}
+
+async function syncStockBatches(ctx) {
+  let fetched = 0, upserted = 0, deleted = 0;
+  const notes = [];
+  for (const whId of ctx.warehouseIds) {
+    const raw = [];
+    await ctx.pages(`/api/Reports/ProductsInLocationReport?warehouseId=${whId}&excludeQuarantine=false`,
+      async batch => { raw.push(...batch.filter(r => r.ProductInLocationId)); }, { size: 500 });
+    fetched += raw.length;
+    if (!raw.length) { notes.push(`warehouse ${whId}: report returned no rows; left unchanged`); continue; }
+    const lookups = await batchLookups();
+    const mapped = raw.map(r => lookups.map(r, whId));
+    const unmapped = mapped.filter(m => !m.clientId).length;
+    if (unmapped) notes.push(`warehouse ${whId}: ${unmapped} rows with an unknown client short name`);
+    await tx(async db => {
+      upserted += await bulkUpsert(db, 'stock_batches', BATCH_COLS, mapped.map(m => m.row), { nowCol: 'synced_at' });
+      const del = await db.query(`DELETE FROM stock_batches WHERE warehouse_id = $1 AND NOT (id = ANY($2::int[]))`,
+        [whId, raw.map(r => r.ProductInLocationId)]);
+      deleted += del.rowCount;
+    });
+  }
+  return { fetched, upserted, deleted, note: notes.join('; ') || undefined };
+}
+
 // ── Orders (+ items inline, replaced as a set) ────────────────────────────────
 
 async function writeOrderPage(ctx, batch, seen) {
@@ -404,8 +470,8 @@ async function syncAccruals(ctx) {
 }
 
 module.exports = {
-  syncReference, syncClients, syncProducts, syncStock, syncOrdersSince, syncOrdersFull, syncAsns, syncInvoices, syncAccruals,
+  syncReference, syncClients, syncProducts, syncStock, syncStockBatches, syncOrdersSince, syncOrdersFull, syncAsns, syncInvoices, syncAccruals,
   // exported for the reconcile tool and tests
-  ORDER_COLS, ASN_COLS, mapClient, mapProduct, mapStock, mapOrder, mapOrderItem, mapAsn, mapAsnItem, mapInvoice, costs,
+  ORDER_COLS, ASN_COLS, BATCH_COLS, batchLookups, ukDate, mapClient, mapProduct, mapStock, mapOrder, mapOrderItem, mapAsn, mapAsnItem, mapInvoice, costs,
   str, num, int, bool, idOf,
 };

@@ -266,7 +266,7 @@ export default function Sidebar() {
 
   return (
     <aside className={clsx(
-      'w-60 bg-navy border-r border-navy-dark flex flex-col fixed top-16 left-0 bottom-0 z-40',
+      'w-60 bg-navy border-r border-navy-dark flex flex-col fixed top-16 left-0 bottom-0 z-40 print:hidden',
       'transition-transform duration-200 ease-in-out',
       'lg:translate-x-0',
       sidebarOpen ? 'translate-x-0' : '-translate-x-full'

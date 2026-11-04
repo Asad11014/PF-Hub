@@ -176,7 +176,8 @@ function attachLogging(page, persona) {
     const cl = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     await login(wh, '__wh__');
     await login(cl, '__client__');
-    const expectText = (label, text, needle) => results.expectations.push({ label, expected: [`text "${needle}"`], got: text.includes(needle) ? 'present' : 'absent', ok: text.includes(needle) });
+    // Case-insensitive: innerText follows CSS text-transform (e.g. uppercase tile labels).
+    const expectText = (label, text, needle) => { const ok = text.toLowerCase().includes(needle.toLowerCase()); results.expectations.push({ label, expected: [`text "${needle}"`], got: ok ? 'present' : 'absent', ok }); };
     const pageText = async (ctx, name, url) => {
       const p = await ctx.newPage();
       await visit(p, name, url);
@@ -187,8 +188,10 @@ function attachLogging(page, persona) {
 
     const overview = await api(wh, 'WH GET admin/subscriptions', '/api/admin/subscriptions', {}, { status: [200] });
     const clients = overview.body?.clients || [];
-    const allGranted = clients.length > 0 && clients.every(c => c.effective.includes('core') && c.effective.includes('forecasting'));
-    results.expectations.push({ label: `every client has Basic + Forecasting after seed (${clients.length} clients)`, expected: ['all'], got: allGranted ? 'all' : 'missing', ok: allGranted });
+    // Seeded clients keep Basic + Forecasting; clients that appeared later get the default (Basic).
+    const seeded = clients.filter(c => c.configured), later = clients.filter(c => !c.configured);
+    const allGranted = seeded.length > 0 && seeded.every(c => c.effective.includes('core') && c.effective.includes('forecasting')) && later.every(c => c.effective.includes('core'));
+    results.expectations.push({ label: `seeded clients have Basic + Forecasting (${seeded.length}); later clients have Basic (${later.length})`, expected: ['all'], got: allGranted ? 'all' : 'missing', ok: allGranted });
     const original = clients.find(c => c.id === CID)?.subscriptions || {};
     const put = (module, status) => api(wh, `WH set ${module}=${status}`, '/api/admin/subscriptions', { method: 'PUT', data: { clientId: CID, module, status } }, { status: [200] });
 
@@ -210,6 +213,42 @@ function attachLogging(page, persona) {
     }
     await api(cl, 'CLIENT forecasting after restore', '/api/forecasting/config', {}, { status: [200] });
     expectText('WH admin page lists clients', await pageText(wh, 'wh-20-client-subscriptions', '/app/admin/subscriptions'), 'Client Subscriptions');
+
+    // BBE + Quarantine reports with the modules switched on for the test client.
+    await put('bbe', 'active'); await put('quarantine', 'active');
+    const bb = await api(cl, 'CLIENT BBE with module', '/api/stock/bbe', {}, { status: [200] });
+    const bbRows = bb.body?.rows || [];
+    results.expectations.push({ label: `CLIENT BBE rows are own client only (${bbRows.length} rows)`, expected: ['own'], got: bbRows.every(r => r.clientId === CID) ? 'own' : 'foreign', ok: bbRows.every(r => r.clientId === CID) });
+    await api(cl, 'CLIENT BBE foreign client', '/api/stock/bbe?clientId=6', {}, { status: [403] });
+    const qr = await api(cl, 'CLIENT quarantine with module', '/api/stock/quarantine', {}, { status: [200] });
+    results.expectations.push({ label: `CLIENT quarantine rows are own client only (${(qr.body?.rows || []).length} rows)`, expected: ['own'], got: (qr.body?.rows || []).every(r => r.clientId === CID) ? 'own' : 'foreign', ok: (qr.body?.rows || []).every(r => r.clientId === CID) });
+    await api(cl, 'CLIENT quarantine foreign client', '/api/stock/quarantine?clientId=6', {}, { status: [403] });
+    const prevWindow = bb.body?.warningDays ?? 90;
+    await api(cl, 'CLIENT BBE warning window save', '/api/stock/bbe/settings', { method: 'PUT', data: { warningDays: 120 } }, { status: [200] });
+    expectText('CLIENT BBE page renders bands', await pageText(cl, 'cl-17-bbe', '/app/stock/bbe'), 'Expired');
+    expectText('CLIENT quarantine page renders', await pageText(cl, 'cl-18-quarantine', '/app/stock/quarantine'), 'Units in quarantine');
+    await api(cl, 'CLIENT BBE warning window restore', '/api/stock/bbe/settings', { method: 'PUT', data: { warningDays: prevWindow } }, { status: [200] });
+    for (const m of ['bbe', 'quarantine']) {
+      const o = original[m] || { status: 'cancelled' };
+      await api(wh, `WH restore ${m}`, '/api/admin/subscriptions', { method: 'PUT', data: { clientId: CID, module: m, status: o.status, ends_at: o.ends_at, price_pence: o.price_pence, notes: o.notes } }, { status: [200] });
+    }
+    expectText('WH BBE page (all clients)', await pageText(wh, 'wh-22-bbe-all', '/app/stock/bbe'), 'all clients');
+    expectText('WH quarantine page (all clients)', await pageText(wh, 'wh-23-quarantine-all', '/app/stock/quarantine'), 'all clients');
+
+    // Pick list: product names filled, and a long order prints over several pages.
+    const longOrder = process.env.LONG_ORDER || 'AM3372';
+    const pl = await api(wh, `WH picklist ${longOrder}`, `/api/picklist?orderNumber=${encodeURIComponent(longOrder)}`, {}, { status: [200] });
+    const plLines = pl.body?.lines || [];
+    const named = plLines.filter(l => l.name).length;
+    results.expectations.push({ label: `pick list names filled (${named}/${plLines.length})`, expected: ['all'], got: plLines.length && named === plLines.length ? 'all' : 'missing', ok: plLines.length > 0 && named === plLines.length });
+    const pp = await wh.newPage();
+    await pp.goto(BASE + '/app/operations/pick-list', { waitUntil: 'domcontentloaded' }); await sleep(1200);
+    await pp.getByPlaceholder(/IN84815/).fill(longOrder); await pp.getByRole('button', { name: /Build Pick List/ }).click(); await waitSettled(pp);
+    const pdf = await pp.pdf({ format: 'A4' });
+    fs.writeFileSync(path.join(OUT, 'wh-21-picklist-print.pdf'), pdf);
+    const pdfPages = (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length;
+    results.expectations.push({ label: `pick list ${longOrder} prints on several pages (${plLines.length} lines)`, expected: ['>1 page'], got: `${pdfPages} pages`, ok: pdfPages > 1 });
+    await pp.close();
     await wh.close(); await cl.close();
   }
 

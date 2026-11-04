@@ -361,6 +361,47 @@ async function ensureCoreSchema() {
     await query(`ALTER TABLE ${table_name} ALTER COLUMN ${column_name} TYPE NUMERIC`);
   }
 
+  // ── Stock by location / batch (BBE and Quarantine reports) ────────────────
+  // Mirror of Mintsoft's Products-In-Location report: one row per product ×
+  // location × batch × type, keyed by Mintsoft's ProductInLocationId. Replaced
+  // in full on every sync, like stock levels.
+  await query(`
+    CREATE TABLE IF NOT EXISTS stock_batches (
+      id              INTEGER PRIMARY KEY,
+      warehouse_id    INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+      client_id       INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+      product_id      INTEGER REFERENCES products(id) ON DELETE SET NULL,
+      sku             TEXT NOT NULL,
+      product_name    TEXT,
+      location        TEXT,
+      location_type   TEXT,
+      line_type       TEXT,          -- Allocation | Quarantine | Allocation_OffHand
+      batch_no        TEXT,
+      serial_no       TEXT,
+      best_before     DATE,
+      quantity        INTEGER NOT NULL DEFAULT 0,
+      allocated_order TEXT,
+      carton_code     TEXT,
+      pallet_code     TEXT,
+      updated_at      TIMESTAMPTZ,
+      synced_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS stock_batches_client_bb_idx   ON stock_batches (client_id, best_before)`);
+  await query(`CREATE INDEX IF NOT EXISTS stock_batches_client_type_idx ON stock_batches (client_id, line_type)`);
+
+  // Per-client preferences (e.g. bbe_warning_days).
+  await query(`
+    CREATE TABLE IF NOT EXISTS client_settings (
+      client_id  INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      key        TEXT NOT NULL,
+      value      JSONB NOT NULL,
+      updated_by TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (client_id, key)
+    )
+  `);
+
   // ── Subscription modules (server/entitlements.js) ─────────────────────────
   // Catalogue of modules, per-client entitlements, an audit trail of every
   // change, and small app-wide settings (e.g. default modules for new clients).

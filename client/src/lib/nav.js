@@ -120,6 +120,8 @@ export const WAREHOUSE_NAV = [
       { to: '/app/inventory/snapshot',      label: 'Live Snapshot',     icon: '📷' },
       { to: '/app/inventory/aging',         label: 'Aging Report',      icon: '⏳' },
       { to: '/app/inventory/velocity',      label: 'SKU Velocity',      icon: '⚡' },
+      { to: '/app/stock/bbe',               label: 'BBE Report',        icon: '⏰' },
+      { to: '/app/stock/quarantine',        label: 'Quarantine Report', icon: '🚫' },
       { to: '/app/financial/profitability', label: 'Revenue Breakdown', icon: '💹' },
       { to: '/app/analytics/best-sellers',  label: 'Best Sellers',      icon: '🏆' },
       { to: '/app/analytics/sales-trend',   label: 'Sales Trend',       icon: '📊' },

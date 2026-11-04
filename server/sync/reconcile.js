@@ -20,6 +20,8 @@ const COLS = {
     'best_before_warning_days', 'image_url', 'country_of_manufacture_id', 'commodity_code', 'packing_instructions',
     'subscription', 'category', 'supplier', 'updated_at'],
   stock: ['product_id', 'warehouse_id', 'client_id', 'sku', 'qty_on_hand', 'qty_allocated', 'qty_available', 'qty_pre_order', 'qty_total'],
+  stock_batches: ['id', 'warehouse_id', 'client_id', 'product_id', 'sku', 'product_name', 'location', 'location_type', 'line_type',
+    'batch_no', 'serial_no', 'best_before', 'quantity', 'allocated_order', 'carton_code', 'pallet_code', 'updated_at'],
   orders: ['id', 'warehouse_id', 'client_id', 'order_number', 'external_reference', 'status_id', 'status_name', 'channel_id', 'channel_name',
     'order_date', 'despatch_date', 'required_despatch_date', 'required_delivery_date', 'sla_warning_date', 'sla_despatch_date',
     'recipient_title', 'recipient_first_name', 'recipient_last_name', 'recipient_company',
@@ -137,6 +139,46 @@ async function reconcile({ apiKey, only = null, log = () => {} } = {}) {
       comparePage(t, COLS.stock, rows, db, { updatedIdx: -1 });
       const seen = new Set(rows.map(r => r[0]));
       for (const id of db.keys()) if (!seen.has(id)) { t.extraInDb++; sample(t, 'extra', id); }
+    }
+    report.push(t); log(t);
+  }
+
+  // ── Stock by location / batch: every column vs the report, and per SKU × type
+  // totals vs Mintsoft's separate Inventory endpoint (an independent source).
+  if (want('stock_batches')) {
+    const t = tally('stock_batches');
+    const lookups = await E.batchLookups();
+    for (const whId of ctx.warehouseIds) {
+      const raw = [];
+      await ctx.pages(`/api/Reports/ProductsInLocationReport?warehouseId=${whId}&excludeQuarantine=false`,
+        async b => { raw.push(...b.filter(r => r.ProductInLocationId)); }, { size: 500 });
+      const rows = raw.map(r => lookups.map(r, whId).row);
+      const db = await dbRows(`SELECT *, to_char(best_before, 'YYYY-MM-DD') AS best_before FROM stock_batches WHERE warehouse_id = $1`, [whId]);
+      t.api += rows.length; t.db += db.size;
+      comparePage(t, COLS.stock_batches, rows, db, { syncedAt });
+      const seen = new Set(rows.map(r => r[0]));
+      for (const id of db.keys()) if (!seen.has(id)) { t.extraInDb++; sample(t, 'extra', id); }
+
+      const inv = [];
+      await ctx.pages(`/api/Product/Inventory/Bulk?WarehouseId=${whId}&Breakdown=true`, async b => { inv.push(...b); });
+      const key = (sku, type) => `${sku}|${type}`;
+      const want2 = {}, have = {};
+      // Totals per SKU × type, and per SKU × type × best-before date (catches date parsing too).
+      for (const p of inv) for (const bd of p.Breakdown || []) {
+        want2[key(p.SKU, bd.Type)] = (want2[key(p.SKU, bd.Type)] || 0) + (bd.Quantity || 0);
+        const bb = E.ukDate(bd.BestBefore);
+        if (bb) want2[key(p.SKU, `${bd.Type}@${bb}`)] = (want2[key(p.SKU, `${bd.Type}@${bb}`)] || 0) + (bd.Quantity || 0);
+      }
+      const sums = await query(
+        `SELECT sku, line_type AS t, SUM(quantity)::int AS q FROM stock_batches WHERE warehouse_id = $1 GROUP BY 1, 2
+         UNION ALL
+         SELECT sku, line_type || '@' || to_char(best_before, 'YYYY-MM-DD'), SUM(quantity)::int FROM stock_batches
+         WHERE warehouse_id = $1 AND best_before IS NOT NULL GROUP BY 1, 2`, [whId]);
+      for (const r of sums) have[key(r.sku, r.t)] = r.q;
+      const off = [...new Set([...Object.keys(want2), ...Object.keys(have)])].filter(k => (want2[k] || 0) !== (have[k] || 0));
+      t.inventoryCrossCheck = { pairs: Object.keys(want2).length, differ: off.length };
+      off.slice(0, 5).forEach(k => sample(t, 'inventory-total-differs', k, `inventory ${want2[k] || 0} vs db ${have[k] || 0}`));
+      t.drift += off.length;
     }
     report.push(t); log(t);
   }

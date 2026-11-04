@@ -17,6 +17,7 @@ const replen      = require('./replen');
 const returns     = require('./returns');
 const forecasting = require('./forecasting/api');
 const storage     = require('./storage');
+const stockReports = require('./stockreports');
 const { sendEmail } = require('./email');
 const { ensureCoreSchema } = require('./schema');
 const { runFullSync, runIncrementalSync, runReconcile, getSyncStatus, abandonStaleJobs, startScheduler } = require('./sync');
@@ -323,6 +324,27 @@ const server = http.createServer(async (req, res) => {
       if (!session) return;
       if (session.demo) return res.json(403, { error: 'Disabled in demo' });
       try { return await forecasting.deleteEvent(req, res, url, session); }
+      catch (err) { return res.json(500, { error: err.message }); }
+    }
+
+    // ── BBE + Quarantine reports (add-on modules; DB-backed) ──────────────────
+    if (pathname === '/api/stock/bbe' && req.method === 'GET') {
+      const session = requireScopedSession(req, res, url);
+      if (!session) return;
+      try { return await stockReports.bbe(req, res, url, session); }
+      catch (err) { return res.json(500, { error: err.message }); }
+    }
+    if (pathname === '/api/stock/bbe/settings' && req.method === 'PUT') {
+      const session = requireScopedSession(req, res, url);
+      if (!session) return;
+      if (blockDemoWrite(session, req, res)) return;
+      try { return await stockReports.bbeSettings(req, res, url, session); }
+      catch (err) { return res.json(500, { error: err.message }); }
+    }
+    if (pathname === '/api/stock/quarantine' && req.method === 'GET') {
+      const session = requireScopedSession(req, res, url);
+      if (!session) return;
+      try { return await stockReports.quarantine(req, res, url, session); }
       catch (err) { return res.json(500, { error: err.message }); }
     }
 

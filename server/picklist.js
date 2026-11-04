@@ -9,6 +9,7 @@
 // Mintsoft won't allocate it.
 
 const { mintsoftGet } = require('./mintsoft');
+const { query } = require('./db');
 
 const PAGE_LIMIT = 100;
 
@@ -16,9 +17,11 @@ const PAGE_LIMIT = 100;
 const LOCATION_TYPE_RANK = { 'PICK': 0, 'STORE': 1, 'BULK': 2, 'PALLET': 3, 'GOODS IN': 4 };
 
 // Build a map of SKU → [{ location, locationType, quantity, batchNo, bestBefore }]
-// for a warehouse + client, excluding unassigned/quarantine stock.
+// for a warehouse + client, excluding unassigned/quarantine stock. Also returns
+// SKU → product name from the same report (Mintsoft order items carry no name).
 async function fetchLocationMap(apiKey, warehouseId, clientId) {
   const map = {};
+  const names = {};
   let pageNo = 1;
   while (true) {
     const path = `/api/Reports/ProductsInLocationReport`
@@ -32,6 +35,7 @@ async function fetchLocationMap(apiKey, warehouseId, clientId) {
     for (const row of batch) {
       const sku = row.ProductSKU;
       const loc = row.Location;
+      if (sku && row.ProductName && !names[sku]) names[sku] = row.ProductName;
       if (!sku || !loc || loc === 'UNASSIGNED') continue;
       if (!map[sku]) map[sku] = [];
       map[sku].push({
@@ -57,7 +61,7 @@ async function fetchLocationMap(apiKey, warehouseId, clientId) {
       return b.quantity - a.quantity;
     });
   }
-  return map;
+  return { map, names };
 }
 
 // GET /api/picklist?orderNumber=XXXX
@@ -83,7 +87,16 @@ async function handle(req, res, url, session) {
   const items       = order.OrderItems || [];
 
   // 2. Build the SKU → locations map for this order's warehouse + client.
-  const locationMap = await fetchLocationMap(session.apiKey, warehouseId, clientId);
+  const { map: locationMap, names: reportNames } = await fetchLocationMap(session.apiKey, warehouseId, clientId);
+
+  // Product names: our synced catalogue first (by product id), then the
+  // location report (by SKU) for anything not in the database yet.
+  const productIds = [...new Set(items.map(it => it.ProductId).filter(Boolean))];
+  const dbNames = {};
+  if (productIds.length) {
+    const rows = await query(`SELECT id, name FROM products WHERE id = ANY($1::int[])`, [productIds]);
+    rows.forEach(r => { if (r.name) dbNames[r.id] = r.name; });
+  }
 
   // 3. Compose the pick list lines.
   const clientName = (session.clients || [])
@@ -97,7 +110,7 @@ async function handle(req, res, url, session) {
       return {
         sku,
         productId:    it.ProductId || null,
-        name:         it.ProductName || it.Name || '',
+        name:         dbNames[it.ProductId] || reportNames[sku] || '',
         qtyRequired:  it.Quantity || 0,
         locations,                                   // [] when no physical stock found
         totalAvailable: locations.reduce((s, l) => s + l.quantity, 0),

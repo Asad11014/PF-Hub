@@ -53,17 +53,17 @@ Prepared 2026-10-21. Same rules as `docs/v3-plan.md` §0: one stage per prompt, 
 **Model**: Sonnet 5 (follows the engine's existing patterns; spec above).
 **Work**: `stock_batches` table and mapper (`BestBefore` dd/MM/yyyy → DATE); Inventory/Bulk crawl + location report, joined; hourly full replace; reconcile entity; diag lines.
 **DoD**
-- [ ] Reconcile: `stock_batches` 0 missing / extra / drift; the best-before line count and quarantine units match a fresh API crawl.
-- [ ] Hourly run stays < 60 API calls and < 30 s.
-- [ ] Unit test for the date parser (dd/MM/yyyy, blanks, invalid).
+- [x] Reconcile: `stock_batches` 0 missing / extra / drift; the best-before line count and quarantine units match a fresh API crawl.
+- [x] Hourly run stays < 60 API calls and < 30 s.
+- [x] Unit test for the date parser (dd/MM/yyyy, blanks, invalid).
 
 ### M3 — BBE and Quarantine reports
 **Model**: Sonnet 5 (UI + queries from the spec); Opus 5.5 reviews the module and scope checks only.
 **Work**: `/api/stock/bbe` and `/api/stock/quarantine` (scope + module); client pages under Stock Analytics, warehouse pages under Figures; per-client BBE warning window (`client_settings`); CSV export; help-guide entries; harness pages + checks.
 **DoD**
 - [ ] Serendipity BBE and Amaura quarantine figures match Mintsoft (spot-check 3 SKUs each).
-- [ ] Client without the module sees the add-on page; client with it sees only their own rows; foreign `clientId` → 403.
-- [ ] Harness 0 failures; screenshots of both reports (client + warehouse).
+- [x] Client without the module sees the add-on page; client with it sees only their own rows; foreign `clientId` → 403.
+- [x] Harness 0 failures; screenshots of both reports (client + warehouse).
 
 ### Later (not planned yet)
 - Online payments (Stripe Checkout + webhooks → `client_subscriptions`), once prices are set.
@@ -74,9 +74,16 @@ Prepared 2026-10-21. Same rules as `docs/v3-plan.md` §0: one stage per prompt, 
 | Stage | Date | Branch | Model | Evidence |
 |---|---|---|---|---|
 | M1 | 2026-10-21 | `v3/m1-entitlements` | Opus 5.5 | `npm test` 12/12 (4 new access-rule tests); harness 31/31 PASS (16 new), 36 pages, console errors 1 = baseline; seed granted Basic + Forecasting to all 22 local clients (44 rows); toggles audited in `subscription_events` and effective immediately (cache cleared on change); screenshots `wh-20-client-subscriptions`, `cl-15-planner-locked`, `cl-16-no-subscription` |
+| M2 + M3 + pick list | 2026-11-04 | `v3/m2-stock-reports` | Opus 5.5 | `stock_batches` reconcile 1,093/1,093 rows, 0 drift; cross-check vs Mintsoft Inventory endpoint 932/932 SKU × type (× best-before) totals equal; hourly 31–41 calls, 4–11 s; `npm test` 13/13; harness 50/50 (BBE/Quarantine own-client only, foreign client 403, warning window saves; pick list names 56/56 and AM3372 prints on 4 pages); screenshots `cl-17-bbe`, `cl-18-quarantine`, `wh-22-bbe-all`, `wh-23-quarantine-all`, `wh-21-picklist-print.pdf` |
 
 M1 notes
 - Enforcement is one check in `server/index.js` for every `/api` request from a client session (`entitlements.checkAccess`). The path → module map is in `server/entitlements.js` (`PATH_MODULES`), so a new module needs one line there plus a `modules` catalogue entry.
 - A client with no rows follows the "New clients" default (Basic). Switching a module for such a client first writes the defaults as explicit rows, so other modules are never lost by accident.
 - A login whose client cannot be identified (no `clientId`) keeps the existing "not linked" behaviour instead of the subscription screen.
 - BBE and Quarantine menu items and routes exist for clients (locked add-on page). Their content arrives in M3. Until then, a client granted the module sees a "coming soon" placeholder.
+
+M2 + M3 notes
+- The location report gives best-before as `dd/MM/yyyy HH:mm:ss` (the Inventory endpoint uses `dd/MM/yyyy`). The first run stored no dates because only the second format was parsed. The reconcile cross-check now also compares units per SKU × type × best-before date against the Inventory endpoint, and it failed (161 totals off) on the bad data before the fix.
+- Quarantine has two forms in Mintsoft: lines with quarantine status (127 units locally) and stock in a QUARANTINE-type location, mostly off-hand (1,150 units). The report lists both with a "Held as" column.
+- Spot-check: Serendipity holds 1,348 expired units (9 batch lines), most of it already in the quarantine location; Vending Warehouse holds 10.
+- Pick list: Mintsoft order items carry no product name. Names now come from our products table (then the location report). Printing was clipped to one screen by the fixed-height app shell; global print rules let every page flow onto further sheets, repeat the table header and an order/client line on every page, keep rows whole and add a tick box per line.

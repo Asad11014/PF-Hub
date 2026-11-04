@@ -4,7 +4,7 @@
 // a heartbeat on sync_jobs, and advances per-entity cursors only on success.
 //
 // Modes (all read-only against Mintsoft; writes go to our database only)
-//   hourly     clients, products (changed), stock, orders (changed), ASNs (changed), accruals
+//   hourly     clients, products (changed), stock, stock batches, orders (changed), ASNs (changed), accruals
 //   nightly    hourly + reference data, invoices (last 120 days)
 //   full       everything from scratch, then removes records Mintsoft has deleted
 //   reconcile  re-crawls Mintsoft and compares every column with the database
@@ -46,6 +46,7 @@ function stepsFor(mode) {
     { name: 'Clients', run: ctx => E.syncClients(ctx) },
     { name: 'Products', cursor: 'products', run: (ctx, since) => E.syncProducts(ctx, { since: full ? null : since }) },
     { name: 'Stock levels', run: ctx => E.syncStock(ctx) },
+    { name: 'Stock batches', run: ctx => E.syncStockBatches(ctx) },
     { name: 'Orders', cursor: 'orders', run: (ctx, since) => (full ? E.syncOrdersFull(ctx) : E.syncOrdersSince(ctx, since)) },
     { name: 'ASNs', cursor: 'asns', run: (ctx, since) => E.syncAsns(ctx, { since: full ? null : since }) },
   );
