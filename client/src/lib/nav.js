@@ -136,6 +136,7 @@ export const WAREHOUSE_NAV = [
   { type: 'link', to: '/app/todo',                   label: 'To Do Lists',         icon: '✅' },
   { type: 'link', to: '/app/admin/subscriptions',    label: 'Client Subscriptions', icon: '🔑' },
   { type: 'link', to: '/app/audit',                  label: 'Invoice Audit',       icon: '🧾', permission: 'invoice_audit' },
+  { type: 'link', to: '/app/wix',                    label: 'Wix Integration',     icon: '🔌', permission: 'wix_integration' },
   { type: 'link', to: '/app/help',                   label: 'Help Guides',         icon: '❓' },
 ];
 
