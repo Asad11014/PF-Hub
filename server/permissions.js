@@ -15,6 +15,10 @@ const PERMISSIONS = {
   // Review findings, sign off invoices, confirm prices and edit audit rules.
   // Without it a user with invoice_audit can only view. Checked in server/audit.js.
   invoice_audit_review: { name: 'Invoice Audit reviewing', paths: [] },
+  // Wix ↔ Mintsoft integration page (server/wix.js). View status, previews, held orders, errors.
+  wix_integration: { name: 'Wix Integration', paths: ['/api/wix/'] },
+  // Switch Mintsoft writes, import, retry, create products, edit mappings. Checked in server/wix.js.
+  wix_integration_manage: { name: 'Wix Integration managing', paths: [] },
 };
 const PERMISSION_KEYS = Object.keys(PERMISSIONS);
 const OWNERS_KEY = 'invoice_audit_owners';

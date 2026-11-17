@@ -11,6 +11,7 @@ const { requireScope } = require('./scope');
 const entitlements = require('./entitlements');
 const permissions  = require('./permissions');
 const audit        = require('./audit');
+const wix          = require('./wix');
 const reports   = require('./reports/index');
 const dashboard = require('./reports/dashboard');
 const calendar    = require('./calendar');
@@ -138,6 +139,16 @@ const server = http.createServer(async (req, res) => {
       if (!session.isWarehouse) return res.json(403, { error: 'Warehouse users only' });
       try { return await audit.handle(req, res, url, session); }
       catch (err) { console.error('[audit]', err); return res.json(500, { error: err.message }); }
+    }
+
+    // ── Wix integration (permission 'wix_integration', enforced above) ────────
+    if (pathname.startsWith('/api/wix/')) {
+      const session = auth.requireSession(req, res);
+      if (!session) return;
+      if (!session.isWarehouse) return res.json(403, { error: 'Warehouse users only' });
+      if (blockDemoWrite(session, req, res)) return;
+      try { return await wix.handle(req, res, url, session); }
+      catch (err) { console.error('[wix]', err); return res.json(500, { error: err.message }); }
     }
 
     // ── Report list ───────────────────────────────────────────────────────────
