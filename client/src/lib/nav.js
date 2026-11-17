@@ -129,6 +129,13 @@ export const WAREHOUSE_NAV = [
       { to: '/app/analytics/sales-trend',   label: 'Sales Trend',       icon: '📊' },
     ],
   },
+  {
+    // Connections between client sales channels and Mintsoft. Hidden when the user can see none of them.
+    type: 'group', id: 'integrations', label: 'Client Integrations', icon: '🔌',
+    items: [
+      { to: '/app/wix', label: 'Wix Integration', icon: '🛍️', permission: 'wix_integration' },
+    ],
+  },
   { type: 'link', to: '/app/operations/returns-hub', label: 'Returns Portal',      icon: '↩️' },
   { type: 'link', to: '/app/shipping-requests',      label: 'Shipping Requests',   icon: '🚢' },
   { type: 'link', to: '/app/extras-requests',        label: 'Requests for Extras', icon: '✨' },
@@ -136,7 +143,6 @@ export const WAREHOUSE_NAV = [
   { type: 'link', to: '/app/todo',                   label: 'To Do Lists',         icon: '✅' },
   { type: 'link', to: '/app/admin/subscriptions',    label: 'Client Subscriptions', icon: '🔑' },
   { type: 'link', to: '/app/audit',                  label: 'Invoice Audit',       icon: '🧾', permission: 'invoice_audit' },
-  { type: 'link', to: '/app/wix',                    label: 'Wix Integration',     icon: '🔌', permission: 'wix_integration' },
   { type: 'link', to: '/app/help',                   label: 'Help Guides',         icon: '❓' },
 ];
 

@@ -221,7 +221,9 @@ function CollapsibleGroup({ group, closeSidebar, depth = 0, open: openProp, onTo
 function AccordionNav({ nav: fullNav, closeSidebar }) {
   const location = useLocation()
   const { hasPermission } = useSession()
-  const nav = fullNav.filter(e => !e.permission || hasPermission(e.permission))
+  const allowed = e => !e.permission || hasPermission(e.permission)
+  // Drop links the user can't open, and groups left with nothing they can open.
+  const nav = fullNav.filter(allowed).filter(e => e.type !== 'group' || e.items.some(allowed))
   const [openId, setOpenId] = useState(() => {
     const g = nav.find(e => e.type === 'group' && e.items.some(i => location.pathname.startsWith(i.to)))
     return g?.id || null
